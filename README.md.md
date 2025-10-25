@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # realfindbitcoin
 TThis system has the real ability to find real bitcoins and has currently located 18 wallets with balances. Anyone can find real bitcoins using this system and running it locally. 
 This information will change everything you know about how to truly find bitcoin private keys and passkeys, as it uses eleven repeated words from BIP39, the last of which is a random word. Run the system and see for yourself.
@@ -67,3 +68,6 @@ If you want to help us, you can send Bitcoins to the wallet below. This way, we 
 1DiegoU6ETJXK9hNWVTeuK4Y8fkksPnEnK (My Bitcoin WALLET for donations)
 
 We found many private keys and many PASSKEYS. When you make a donation, you can request the full list via our Telegram: @celicaitoken
+=======
+
+>>>>>>> b891920f294018658d6483404bfa586f17d7c831
