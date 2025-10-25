@@ -9,9 +9,26 @@ Com sistema de checkpoint baseado na última combinação testada.
 import os
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bip_utils import Bip39SeedGenerator, Bip39MnemonicValidator
 from bip_utils import Bip44, Bip44Coins, Bip44Changes
 
+
+def make_session(retries=4, backoff_factor=0.5, status_forcelist=(429,500,502,503,504)):
+    session = requests.Session()
+    retry = Retry(total=retries, read=retries, connect=retries, backoff_factor=backoff_factor,
+                  status_forcelist=status_forcelist, raise_on_status=False)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"User-Agent": "btcpalavras/1.0"})
+    return session
+
+http_session = make_session()
 def carregar_palavras_bip39(arquivo="bip39-words.txt"):
     """Carrega a lista de palavras BIP39 do arquivo"""
     if not os.path.exists(arquivo):
@@ -93,17 +110,19 @@ def salvar_ultima_combinacao(arquivo="ultimo.txt", palavra_base="", palavra_comp
     palavras = [palavra_base] * 11 + [palavra_completa]
     mnemonic = " ".join(palavras)
     
-    with open(arquivo, 'w') as f:
+    with open(arquivo, 'w', encoding='utf-8') as f:
         f.write(mnemonic)
+        f.flush()
 
 def salvar_checkpoint(arquivo="checkpoint.txt", base_idx=0, palavra_base="", 
                      contador_total=0, contador_validas=0, carteiras_com_saldo=0):
     """Salva checkpoint com estatísticas atuais"""
-    with open(arquivo, 'w') as f:
+    with open(arquivo, 'w', encoding='utf-8') as f:
         f.write(f"Última palavra base testada: {base_idx + 1} ({palavra_base})\n")
         f.write(f"Total de combinações testadas: {contador_total}\n")
         f.write(f"Combinações válidas: {contador_validas}\n")
         f.write(f"Carteiras com saldo: {carteiras_com_saldo}\n")
+        f.flush()
 
 def criar_mnemonic_repetido(palavra_base, palavra_completa):
     """Cria mnemonic com palavra_base repetida 11 vezes + palavra_completa"""
@@ -141,20 +160,31 @@ def mostrar_info(addr_index):
         "address": addr_index.PublicKey().ToAddress()
     }
 
-def verificar_saldo_mempool(endereco):
-    """Verifica saldo do endereço usando API da Mempool.space"""
-    try:
-        url = f"https://mempool.space/api/address/{endereco}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            saldo = data.get('chain_stats', {}).get('funded_txo_sum', 0)
-            return saldo > 0
-        return False
-    except Exception as e:
-        print(f"Erro ao verificar saldo: {e}")
-        return False
+
+def verificar_saldo_mempool(endereco, timeout=10, max_attempts=4):
+    """Verifica saldo do endereco usando API da mempool.space.
+    Retorna True se houver saldo, False se nao houver, e None em caso de falha temporaria."""
+    url = f"https://mempool.space/api/address/{endereco}"
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            resp = http_session.get(url, timeout=timeout)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    saldo = data.get('chain_stats', {}).get('funded_txo_sum', 0)
+                    return saldo > 0
+                except Exception:
+                    return False
+            if resp.status_code in (429, 500, 502, 503, 504):
+                attempt += 1
+            else:
+                return False
+        except requests.exceptions.RequestException:
+            attempt += 1
+        sleep_time = (2 ** attempt) * 0.25 + random.uniform(0, 0.25)
+        time.sleep(sleep_time)
+    return None
 
 def salvar_carteira_com_saldo(palavra_base, palavra_completa, mnemonic, info):
     """Salva carteira com saldo no arquivo saldo.txt"""
@@ -168,6 +198,9 @@ def salvar_carteira_com_saldo(palavra_base, palavra_completa, mnemonic, info):
         f.write(f"Chave Pública: {info['pub_compressed_hex']}\n")
         f.write("-" * 80 + "\n\n")
     print("🎉 CARTERIA COM SALDO SALVA! 🎉")
+
+BATCH_SIZE = 12
+BATCH_WORKERS = 8
 
 def main():
     """Função principal com sistema de checkpoint baseado na última combinação"""
@@ -212,6 +245,7 @@ def main():
     print("Pressione Ctrl+C para parar\n")
     
     ultimo_salvamento = time.time()
+    batch = []
     
     try:
         # Iterar a partir do ponto atual
@@ -239,7 +273,7 @@ def main():
                     ultimo_salvamento = tempo_atual
                 
                 # Exibir progresso a cada 100 combinações
-                if contador_total % 100 == 0:
+                if contador_total % 1000 == 0:
                     print(f"Testadas {contador_total} combinações | Última: {mnemonic}")
                 
                 # Validar mnemonic
@@ -252,10 +286,21 @@ def main():
                     info = mostrar_info(addr_index)
                     
                     # Verificar saldo
-                    tem_saldo = verificar_saldo_mempool(info["address"])
-                    
+                    batch.append((mnemonic, palavra_base, palavra_completa, info))
+                    if len(batch) >= BATCH_SIZE:
+                        with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as ex:
+                            futures = {ex.submit(verificar_saldo_mempool, item[3]['address']): item for item in batch}
+                            for fut in as_completed(futures):
+                                item = futures[fut]
+                                try:
+                                    res = fut.result()
+                                except Exception:
+                                    res = None
+                                if res is True:
+                                    salvar_carteira_com_saldo(item[1], item[2], item[0], item[3])
+                        batch.clear()
                     # Exibir progresso a cada 100 combinações válidas
-                    if contador_validas % 100 == 0:
+                    if contador_validas % 1000 == 0:
                         print(f"\nProgresso: {contador_validas} combinações válidas testadas")
                         print(f"Última válida: {mnemonic}")
                         print(f"Endereço: {info['address']}")
