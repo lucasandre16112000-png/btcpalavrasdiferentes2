@@ -1,0 +1,5 @@
+ESTATÍSTICAS FINAIS
+==================================================
+Total testadas: 9305
+Válidas: 620
+Com saldo: 0

@@ -1,0 +1,4 @@
+Última palavra base testada: 5 (above)
+Total de combinações testadas: 9305
+Combinações válidas: 620
+Carteiras com saldo: 0
