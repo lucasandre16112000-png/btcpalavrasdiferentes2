@@ -1,0 +1,226 @@
+Palavra Base: abandon (repetida 11x) - CARTEIRA N 1 - LOCALIZADA POR CELI AI
+Palavra Completa: about
+Mnemonic: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
+Endereço: 1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA
+Chave Privada (WIF): L4p2b9VAf8k5aUahF1JCJUzZkgNEAqLfq8DDdQiyAprQAKSbu8hf
+Chave Privada (HEX): e284129cc0922579a535bbf4d1a3b25773090d28c909bc0fed73b5e0222cc372
+Chave Pública: 03aaeb52dd7494c361049de67cc680e83ebcbbbdbeb13637d92cd845f70308af5e
+--------------------------------------------------------------------------------
+
+Palavra Base: abandon (repetida 11x) - CARTEIRA N 2 - LOCALIZADA POR CELI AI
+Palavra Completa: actual
+Mnemonic: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon actual
+Endereço: 149C8bc4UZBMq8npuBZNtWM4kmHkUeVVNb
+Chave Privada (WIF): L49cseSCBs4odR7fUMtYLAtQTah2PbhJMz79Fo6itKvaDM4GhbpW
+Chave Privada (HEX): cec1c5a6072f6ce8fc3408e3bbc33cb751b4c1303ff580234765cf869ccb2989
+Chave Pública: 025f2f18e2b794077b661f1ee1181c9d214ba0ba88e4400fee7b7902afc0c120f7
+--------------------------------------------------------------------------------
+
+Palavra Base: act (repetida 11x) - CARTEIRA N 3 - LOCALIZADA POR CELI AI
+Palavra Completa: box
+Mnemonic: act act act act act act act act act act act box
+Endereço: 1HJ3cNTUFayj3WXMoVRkiASu6f7o55aB1E
+Chave Privada (WIF): L29QbQHmhDNAfBdJFV5MEHtgEShrFQ63wnQhehHTJ22hvHCzzKPx
+Chave Privada (HEX): 92f92440cb686cb4fbf9aa03365000b0291e295575c420328703ca865c59a685
+Chave Pública: 03368aac8d49a0e49dd2bc9fdbca68b8fa9d457188f3f4358a8cbd81dda78549e6
+--------------------------------------------------------------------------------
+
+Palavra Base: act (repetida 11x) - CARTEIRA N 4 - LOCALIZADA POR CELI AI
+Palavra Completa: desk
+Mnemonic: act act act act act act act act act act act desk
+Endereço: 1JELqfS994E643G9UjEXZAuEaKGYFo2qgS
+Chave Privada (WIF): L1d44T3thyA3uzue2nA4yhThk4DSw3ABohknrADKBTvd4FLroFms
+Chave Privada (HEX): 835ba272af7bc6b0763fb01fa8d95f8f2a43801de36c072d51df8b0d7038ccc4
+Chave Pública: 02670b12cd6d6d722dd57cc8bea96f97e74bbfa0379d48e48da69a5a83088b979a
+--------------------------------------------------------------------------------
+
+Palavra Base: adapt (repetida 11x) - CARTEIRA N 5- LOCALIZADA POR CELI AI
+Palavra Completa: absent
+Mnemonic: adapt adapt adapt adapt adapt adapt adapt adapt adapt adapt adapt absent
+Endereço: 1BAp8d7dVPzexcyTzLUvB5NejEw2zM4xDH
+Chave Privada (WIF): L1j17ZMvxS1cAUSRUYG8Fc8HZo1uPMCnviKfikN41GkhVoo6e8PC
+Chave Privada (HEX): 866b1ef8185a719e7fc58028a972553e18f749bef09279d846e94911e2d53677
+Chave Pública: 02d8bc697de816e42236b40202ef8a48d89f450178fc2096f1fad6e04e99d4ce4a
+--------------------------------------------------------------------------------
+
+Palavra Base: admit (repetida 11x) - CARTEIRA N 6 - LOCALIZADA POR CELI AI
+Palavra Completa: achieve
+Mnemonic: admit admit admit admit admit admit admit admit admit admit admit achieve
+Endereço: 1EWXS2qWa3VZ2GfMxZYVowr3qbhUYo53SC
+Chave Privada (WIF): KwwaUVoWLH2B6gcuPw9ftHs9G9ZhiCCj5Wgw3LVw7CpUUh9i5HRQ
+Chave Privada (HEX): 1589baf2543c72b5c9a5dcf5f3c1bf779ade58d78b0dbe1738135184ee0bf7ca
+Chave Pública: 03c1684b1851e1953931c3cc563453d858c4db8fc60410cc39643986a940305eda
+--------------------------------------------------------------------------------
+
+Palavra Base: aim (repetida 11x) - CARTEIRA N 7 - LOCALIZADA POR CELI AI
+Palavra Completa: aim
+Mnemonic: aim aim aim aim aim aim aim aim aim aim aim aim
+Endereço: 1LqUNf28QpHpMuQXe8F9UNUbaofNDFtdmm
+Chave Privada (WIF): KxiJRHK2eKfgr8RRp8L5MBJm6ZNtiXRW88QPotA5onwgEs9oE9N1
+Chave Privada (HEX): 2c8b994561dbc6f754abdb6133efa4a22f8532d9e05d0f7a5d257eaf1c4a807d
+Chave Pública: 02a6371c6d1250d524ce7cdb844832b9c7f75867d261992b5ae6f2ab30bea1600b
+--------------------------------------------------------------------------------
+
+Palavra Base: all (repetida 11x) - CARTEIRA N 8 - LOCALIZADA POR CELI AI
+Palavra Completa: all
+Mnemonic: all all all all all all all all all all all all
+Endereço: 1JAd7XCBzGudGpJQSDSfpmJhiygtLQWaGL
+Chave Privada (WIF): L1KjqxZkUwdXaKNL15F2jJZVZpgi2HkHPHGyqTrQNNegyZez3A7Z
+Chave Privada (HEX): 7a7370d3a2bd4b8e4f922ecf60132fc559b05a4c1747c5f4e1c153b90bd86e7a
+Chave Pública: 03c6d9cc725bb7e19c026df03bf693ee1171371a8eaf25f04b7a58f6befabcd38c
+--------------------------------------------------------------------------------
+
+
+Palavra Base: art (repetida 11x) - CARTEIRA N 9 - LOCALIZADA POR CELI AI
+Palavra Completa: able
+Mnemonic: art art art art art art art art art art art able
+Endereço: 145SdiDuFJvW1HX61TNx45Qx6bhJAo2BQe
+Chave Privada (WIF): L4mc2rzJHDbhtcgBKCooqDwF8L5kfnbJqe2h9Da6u6N5gZUBZdiw
+Chave Privada (HEX): e144ebf38c12c66aca26728c0354a2462f69f9952bf723c3eae2a8f21fcc37e7
+Chave Pública: 03a5371f7761094d00fbb678cfe111d4605828cfc9db55fab78583f5d490270368
+--------------------------------------------------------------------------------
+
+Palavra Base: blue (repetida 11x) - CARTEIRA N 10 - LOCALIZADA POR CELI AI
+Palavra Completa: blue
+Mnemonic: blue blue blue blue blue blue blue blue blue blue blue blue
+Endereço: 1BjvaBwKgmipWfTy7htuLtBob48dXzUqFx
+Chave Privada (WIF): L4GT4SS9Dj4QCsTiJ7kgjuJPS3YLN5oNDKsKkzxckq2Amk3RhHHv
+Chave Privada (HEX): d2455c6d585269127435e0f54fb397a94ea2cc72f18a3b167a35d995d22084dd
+Chave Pública: 02473eb1f08f6450ee0c2f3f5baca507d28ece44630d1f61f10be06e435e1f4397
+--------------------------------------------------------------------------------
+
+Palavra Base: boat (repetida 11x) - CARTEIRA N 11 - LOCALIZADA POR CELI AI
+Palavra Completa: body
+Mnemonic: boat boat boat boat boat boat boat boat boat boat boat body
+Endereço: 1EysvENfY6LbWmodQqy6aZJx69UGeLStww
+Chave Privada (WIF): L18WZKc4KDuD2tUpq2p9xgBJDCxh1VYfvLYJ1CDMMX34SrJHeYgk
+Chave Privada (HEX): 74ac9d40725b49f8056dbf684a4d15dd724c5c51af916f2e562e9f5af3718855
+Chave Pública: 02a7c50c2dfbf643b80b260405990e412bcb040955c4970cb5cb963ad0c8eb457d
+--------------------------------------------------------------------------------
+
+Palavra Base: hello (repetida 11x) - CARTEIRA N 12 - LOCALIZADA POR CELI AI
+Palavra Completa: pair
+Mnemonic: hello hello hello hello hello hello hello hello hello hello hello pair
+Endereço: 1yBPmZ9pAiHNq498ykcDH1p4tVrRyRmJG
+Chave Privada (WIF): L1naPmn9sw7zjekZCEoEurJghqdR428SDrmpcEeAoMVqdXu8sqvw
+Chave Privada (HEX): 8841c64951b47b4617a7e52e97ed5a3d076a98d9e55271c69ccc9ead5ecb44cd
+Chave Pública: 0281ff4c1b20a39708dccf0df8c8e833fcbf069e211ffc1d5b5f138fce7c92540a
+--------------------------------------------------------------------------------
+
+Palavra Base: life (repetida 11x) - CARTEIRA N 13 - LOCALIZADA POR CELI AI
+Palavra Completa: life
+Mnemonic: life life life life life life life life life life life life
+Endereço: 16P3s4Kov6L437Daigvg3zJsjojHFkYMNr
+Chave Privada (WIF): L4RK5uwbsUTE47zy19m6NdE32V5LCP8UQ92ZVC75U5SyTDfS5tT4
+Chave Privada (HEX): d6d484c57e9c2183f411ba37f00cfd8aa0e7203820ea5ff1134c75f6fa8552bd
+Chave Pública: 0263bc0f066ed22e75e76345d8c99dcc36b437d88035719b7f821a100a9cba15bc
+--------------------------------------------------------------------------------
+
+Palavra Base: machine (repetida 11x) - CARTEIRA N 14 - LOCALIZADA POR CELI AI
+Palavra Completa: thought
+Mnemonic: machine machine machine machine machine machine machine machine machine machine machine thought
+Endereço: 1HK4tZ1Jin4odca7NVmqbYM23wueogojif
+Chave Privada (WIF): L22Lc3fyMCWAYTP7wZdENmzz6KXy5zuLNDihLfH2a4xPsnDKUqQ6
+Chave Privada (HEX): 8f5636314afdb609b8343ba02d4f4d10e5f0a3dc2b682f9da659580e84c8e61b
+Chave Pública: 02dd09fddd2ce860079867e3aa088ce92a9b843f4410f9037a6a959d28b4dae374
+--------------------------------------------------------------------------------
+
+Palavra Base: noble (repetida 11x) - CARTEIRA N 15 - LOCALIZADA POR CELI AI
+Palavra Completa: noble
+Mnemonic: noble noble noble noble noble noble noble noble noble noble noble noble
+Endere  o: 16UkSjmKXFFgbNFPjTnP8VWkhHD6N11HnN
+Chave Privada (WIF): KwL6Uhbp8mTfFXovhBRXF2z3hbiR6UqAVuFZdPo4rzcuXiQmqs7J
+Chave Privada (HEX): 0348cc267ee4edc78c158ba5e392d4f0a876ffb1dc15ba9586bb4d7f8518bcbd
+Chave P  blica: 022db0c650a47f69818942149be1f55ff0e9793d9954cef5880127f7fdfd175eaf
+--------------------------------------------------------------------------------
+
+
+Palavra Base: oil (repetida 11x) - CARTEIRA N 16 - LOCALIZADA POR CELI AI
+Palavra Completa: oil
+Mnemonic: oil oil oil oil oil oil oil oil oil oil oil oil
+Endereço: 1CaBE3CYxhqdjcxKCPqwNhsys1weUnZhHJ
+Chave Privada (WIF): L33agrZHV8paDSaQwzMGKdAm6giDpYk11w2crnFYD2tFfz1NL1kU
+Chave Privada (HEX): add0421dc45940fc9e7c8f5d22184b79070232fc5aad754dd577bdf2363df068
+Chave Pública: 032d1e1736727f0957a5137ab93bfbbf6e0c293dd0f65a6c8947b563c1f5827376
+--------------------------------------------------------------------------------
+
+Palavra Base: quality (repetida 11x) - CARTEIRA N 17 - LOCALIZADA POR CELI AI
+Palavra Completa: question
+Mnemonic: quality quality quality quality quality quality quality quality quality quality quality question
+Endereço: 1NFfdoiL1urFYTXSEjQGWXAmjHvXHnRaJS
+Chave Privada (WIF): KxGCfUXm7zMU9RC3Jx2WTHgifXEvYcGZvRVYnKn5T7PjDME22rZe
+Chave Privada (HEX): 1f1e6ea1d57d4c4db2c5ed612fafec7407d7e3445e2e8cde650690f9872749f7
+Chave Pública: 02498db80d2adc6e8c4993e7709e2ef48b31a5733168bd2bb56b1f5b9b94871b87
+--------------------------------------------------------------------------------
+
+Palavra Base: real (repetida 11x) - CARTEIRA N 18 - LOCALIZADA POR CELI AI
+Palavra Completa: real
+Mnemonic: real real real real real real real real real real real real
+Endereço: 1DMYYJE6KTAqN4byt3ovLnUKnTs8xqpyYc
+Chave Privada (WIF): KyCqEsHU2Z2YeqwvRiyp1As6dHnv73UJxdNLxcLSHUaD4HjndJuU
+Chave Privada (HEX): 3b39122b3698d44f73ca4757e6bb1e8203becd910b9a5115621e6810b1819566
+Chave Pública: 034b1df0b11e48781534ec5e21adbde9c57143a64438ee985be79d5396467906b4
+--------------------------------------------------------------------------------
+
+Palavra Base: sad (repetida 11x) - CARTEIRA N 19 - LOCALIZADA POR CELI AI
+Palavra Completa: rug
+Mnemonic: sad sad sad sad sad sad sad sad sad sad sad rug
+Endereço: 19Gtz8A1cLnRGTGjKjV2U8AAxhUWLZGS7n
+Chave Privada (WIF): KyDiwFPH5pzRcTvDfqKyiv5Mf12L8ZSxG8oJEqAUJQN3X6TTRmM1
+Chave Privada (HEX): 3bae741d741aa3cc801994f0df7db8c6c89cb2ac272e2b9ade5d6816913d7918
+Chave Pública: 03f2c3767f9e57d17d0c7b47f5ce27bd2c67b13a07277a1ef26946252313f373f6
+--------------------------------------------------------------------------------
+
+Palavra Base: tree (repetida 11x) - CARTEIRA N 20 - LOCALIZADA POR CELI AI
+Palavra Completa: tree
+Mnemonic: tree tree tree tree tree tree tree tree tree tree tree tree
+Endereço: 1ARztQVfRWrYfAAUxstb33z9g3UpA6HfhS
+Chave Privada (WIF): Kzmh5R3kf2DcTmnrqsrfFQauydQh3i2KgbYPoP84UvJbjqiNkncL
+Chave Privada (HEX): 69f6e17050fe77c4e1211be001dbf3bed366cd9a2e9143d5c7e580fec4fecd2e
+Chave Pública: 024771f4aeefdde395f556fb6b75b5d132ec44df694fe06bc3f0fb74534dfd474d
+--------------------------------------------------------------------------------
+
+Palavra Base: type (repetida 11x) - CARTEIRA N 21 - LOCALIZADA POR CELI AI
+Palavra Completa: type
+Mnemonic: type type type type type type type type type type type type
+Endereço: 1NdgfbHsaD9JmJsKC76bV2E1CXbNxq7hHQ
+Chave Privada (WIF): KwgegxgJ2DuVgLQ8LzAhZpNdoc9mXM7uh9JGZrqWvrp7U8Hz82vf
+Chave Privada (HEX): 0ddbdbf76c09e1fae081f9b091e5c66f472807eb3728ebd7319d7bc1e0f2b000
+Chave Pública: 03a8763b8425a59144fd023b1203495f6c507f1610cd05db9f2ca6cfe01de3091d
+--------------------------------------------------------------------------------
+
+Palavra Base: word (repetida 11x) - CARTEIRA N 22 - LOCALIZADA POR CELI AI
+Palavra Completa: word
+Mnemonic: word word word word word word word word word word word word
+Endereço: 12Zk6irXDyTB7rpzyn5PZKdBGuHZ4pU6EF
+Chave Privada (WIF): L3MfiaeFDfKuwvqMv8v9uuz3sMSJRmk3NYfGgaTf5TE5vhQFwVz9
+Chave Privada (HEX): b71e356a0d91926f07e652c2bed72f87a84e3f49b9862ddf03686c18e22cee6a
+Chave Pública: 0309fafa51a46caeb46afd5b1d3106a18b4cc2e7962beeb2051fe38812ec101c46
+--------------------------------------------------------------------------------
+
+Palavra Base: world (repetida 11x) - - CARTEIRA N 23 - LOCALIZADA POR CELI AI
+Palavra Completa: world
+Mnemonic: world world world world world world world world world world world world
+Endereço: 12UTSu89ysjnZvue2SSQCTWNrvpocmKp95
+Chave Privada (WIF): L2ApvRojZa7a5UJARDyVhAASvwWjT8v4DnvctBx7tcaoXrEsz1Xw
+Chave Privada (HEX): 93b413d698a1486c0ef88486f1b3f98f29a243741fcbb414af9fae7f47cc9496
+Chave Pública: 02b725126c93b7daeecf869f837e74b5d3384400bcd65ea793cb91c2ff0a29022f
+--------------------------------------------------------------------------------
+
+Palavra Base: zoo (repetida 11x) - CARTEIRA N 24 - LOCALIZADA POR CELI AI
+Palavra Completa: wrong
+Mnemonic: zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong
+Endereço: 1EjnS13zBgN6tUgy6U64qFeh53fyAeUsqE
+Chave Privada (WIF): L5NpMzWdTPpmQ1WsjtBpTti3CCXQ7ZjZQo4qcJJXPUBVVWXGC8k4
+Chave Privada (HEX): f362480944a2c58523734a4bd0bb3696ae7c502a2b1cd6624d8f30bccf91bc7a
+Chave Pública: 02a710461ef2cc6db53d2ceeacfbd41f9b47be0e5b62d5e0532c1c1547db4fbc89
+--------------------------------------------------------------------------------
+
+
+-------------------------- ESTATÍSTICAS FINAIS ---------------------------------
+Total de combinações criadas: 983763421134
+Total de combinações testadas: 4194230
+Combinações válidas (BIP39): 262137
+Carteiras com saldo encontradas: 24
+Taxa de sucesso: 0.00915552%
+--------------------------------------------------------------------------------
