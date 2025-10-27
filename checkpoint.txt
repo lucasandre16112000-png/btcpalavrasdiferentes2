@@ -1,4 +1,4 @@
-Última palavra base testada: 782 (giant)
-Total de combinações testadas: 1614310
-Combinações válidas: 28265
-Carteiras com saldo: 0
+Última palavra base testada: 395 (course)
+Total de combinações testadas: 2422300
+Combinações válidas: 78764
+Carteiras com saldo: 4
