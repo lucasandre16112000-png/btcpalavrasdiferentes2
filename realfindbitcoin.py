@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-realfindbitcoin.py
-Versão final adaptada: usa mempool.space + blockchair, parallel 10+2 & 11+1,
-rate-limiter por-API com caps, checkpoint tolerante (int/float), contadores restaurados.
-Mantém a lógica determinística (não pula combinações).
+realfindbitcoin.py — versão final e corrigida
+- usa Blockchair + Mempool APIs
+- paralela: produtores 10+2 e 11+1 + pool de workers
+- rate limiting por-API com cap
+- checkpoint tolerante (int/float)
+- contadores restaurados e logs
 """
 import os
 import time
 import random
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import hmac
@@ -18,48 +21,48 @@ from mnemonic import Mnemonic
 from bitcoin import privtopub, pubtoaddr, encode_privkey
 
 # -------------------------
-# CONFIGURAÇÃO (edite se quiser)
+# CONFIGURAÇÃO (ajuste se quiser)
 # -------------------------
-MODE = "hybrid"  # '10+2', '11+1', or 'hybrid' (10+2 runs first if hybrid)
+MODE = "hybrid"  # '10+2', '11+1', or 'hybrid' (runs 10+2 then 11+1)
 mnemo = Mnemonic('english')
 WORDLIST = mnemo.wordlist
 
-# APIs: (url_template, initial_tps, max_tps)
+# APIs (template, initial_tps, max_tps)
 API_DEFINITIONS = [
-    ("https://api.blockchair.com/bitcoin/dashboards/address/{}", 2.0, 2.5),  # Blockchair (conservador)
-    ("https://mempool.space/api/address/{}", 1.8, 2.0),                    # Mempool.space
+    ("https://api.blockchair.com/bitcoin/dashboards/address/{}", 2.0, 2.5),  # Blockchair
+    ("https://mempool.space/api/address/{}", 1.8, 2.0),                    # mempool.space
 ]
 
-CHECKPOINT_FILE = "checkpoint.txt"   # kept name compatible with your original
+CHECKPOINT_FILE = "checkpoint.txt"
 ULTIMO_FILE = "ultimo.txt"
 SALDO_FILE = "saldo.txt"
 
-# Concurrency
 MAX_WORKERS = 3
 MAX_INFLIGHT_TASKS = MAX_WORKERS * 3
 
-# Retries / backoff
 MAX_RETRIES = 6
 BACKOFF_BASE = 2.0
 JITTER = 0.25
 
-# Adaptive thresholds
 RATE_ADJUST_WINDOW = 30.0
 GLOBAL_429_THRESHOLD = 8
 GLOBAL_PAUSE_SECONDS = 20.0
 
-# Status interval
 STATUS_INTERVAL = 15.0
 
 # -------------------------
-# UTILITÁRIOS: checkpoint compatível e tolerante
+# Helpers checkpoint (tolerante)
 # -------------------------
+def to_int_safe(s):
+    try:
+        return int(s)
+    except Exception:
+        try:
+            return int(float(s))
+        except Exception:
+            return 0
+
 def save_checkpoint(pattern, base_word, var1_idx, var2_idx, counts=None):
-    """
-    Save checkpoint in a tolerant format:
-      pattern (10+2/11+1), base_word, var1_idx, var2_idx, timestamp
-      optionally appended counters TOTAL_TESTS, VALID_BIP39_COUNT, FOUND_WITH_BALANCE
-    """
     try:
         with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
             f.write(f"{pattern}\n{base_word}\n{var1_idx}\n{var2_idx}\n{time.time()}\n")
@@ -69,10 +72,6 @@ def save_checkpoint(pattern, base_word, var1_idx, var2_idx, counts=None):
         print(f"❌ Erro ao salvar checkpoint: {e}")
 
 def load_checkpoint():
-    """
-    Returns (pattern, base_word, var1_idx, var2_idx, counts_dict_or_None)
-    Accepts old formats and tolerates floats for numeric fields.
-    """
     if not os.path.exists(CHECKPOINT_FILE):
         return None, None, 0, 0, None
     try:
@@ -81,30 +80,19 @@ def load_checkpoint():
             if len(lines) >= 4:
                 pattern = lines[0]
                 base_word = lines[1]
-                # parse integers tolerant to floats
-                def to_int_safe(s):
-                    try:
-                        return int(s)
-                    except Exception:
-                        try:
-                            return int(float(s))
-                        except Exception:
-                            return 0
                 var1_idx = to_int_safe(lines[2])
                 var2_idx = to_int_safe(lines[3])
                 counts = None
                 if len(lines) >= 7:
-                    try:
-                        counts = {
-                            "TOTAL_TESTS": to_int_safe(lines[4]),
-                            "VALID_BIP39_COUNT": to_int_safe(lines[5]),
-                            "FOUND_WITH_BALANCE": to_int_safe(lines[6])
-                        }
-                    except Exception:
-                        counts = None
+                    counts = {
+                        "TOTAL_TESTS": to_int_safe(lines[4]),
+                        "VALID_BIP39_COUNT": to_int_safe(lines[5]),
+                        "FOUND_WITH_BALANCE": to_int_safe(lines[6])
+                    }
                 return pattern, base_word, var1_idx, var2_idx, counts
     except Exception as e:
         print(f"❌ Erro ao carregar checkpoint: {e}")
+        print(traceback.format_exc())
     return None, None, 0, 0, None
 
 def save_last_combo(mnemonic):
@@ -131,7 +119,7 @@ def save_wallet_with_balance(mnemonic, address, wif, hex_key, pub_key, balance, 
         print(f"❌ Erro ao salvar carteira com saldo: {e}")
 
 # -------------------------
-# API limiter (token bucket) with cap at max_rate
+# ApiLimiter (token bucket) com cap
 # -------------------------
 class ApiLimiter:
     def __init__(self, initial_rate, max_rate):
@@ -214,7 +202,7 @@ session.mount("http://", adapter)
 session.headers.update({"User-Agent": "realfindbitcoin/1.0"})
 
 # -------------------------
-# key derivation (kept compatible)
+# key derivation
 # -------------------------
 def generate_key_data_from_mnemonic(mnemonic):
     try:
@@ -230,37 +218,20 @@ def generate_key_data_from_mnemonic(mnemonic):
         return None, None, None, None
 
 # -------------------------
-# API query logic (supports blockchair + mempool.space)
+# API response extractors
 # -------------------------
 def extract_balance_from_blockchair_json(data, address):
-    """
-    Blockchair typical structure:
-    {
-      "data": {
-        "{address}": {
-          "address": {
-             "balance": <satoshis>,
-             ...
-          },
-          ...
-        }
-      }
-    }
-    """
     try:
         d = data.get("data", {})
         if address in d:
             addr_info = d[address].get("address", {})
             bal = addr_info.get("balance")
             if bal is None:
-                # sometimes balance found as 'balance' directly under data[address]
                 bal = d[address].get("balance")
             return int(bal) if bal is not None else 0
     except Exception:
         pass
-    # fallback scan
     try:
-        # find first numeric value that looks like satoshi balance
         for v in data.get("data", {}).values():
             if isinstance(v, dict):
                 for sub in v.values():
@@ -271,9 +242,6 @@ def extract_balance_from_blockchair_json(data, address):
     return 0
 
 def extract_balance_from_mempool_json(data):
-    """
-    mempool.space structure: 'chain_stats' with 'funded_txo_sum' and 'spent_txo_sum'
-    """
     try:
         chain = data.get("chain_stats", {})
         funded = chain.get("funded_txo_sum", 0)
@@ -281,27 +249,24 @@ def extract_balance_from_mempool_json(data):
         return max(0, int(funded) - int(spent))
     except Exception:
         pass
-    # fallback
     try:
         return int(data.get("balance", 0) or 0)
     except Exception:
         return 0
 
+# -------------------------
+# API query
+# -------------------------
 def query_apis_for_address(address):
-    """
-    Return (True, balance_btc, api_name) if any API reports balance > 0.
-    """
     for idx, (url_template, _, _) in enumerate(API_DEFINITIONS):
         limiter = API_LIMITERS[idx]
         api_name = url_template.split("//")[1].split("/")[0]
         for attempt in range(MAX_RETRIES):
-            # global pause if many recent 429s
             if get_global_429_count() >= GLOBAL_429_THRESHOLD:
                 print(f"🟠 Muitas 429s globais ({get_global_429_count()}) — pausa global {int(GLOBAL_PAUSE_SECONDS)}s.")
                 time.sleep(GLOBAL_PAUSE_SECONDS)
                 for lim in API_LIMITERS:
                     lim.adjust_rate()
-
             limiter.acquire()
             try:
                 url = url_template.format(address)
@@ -325,32 +290,30 @@ def query_apis_for_address(address):
                     continue
                 resp.raise_for_status()
                 data = resp.json()
-
                 balance_satoshi = 0
                 if "blockchair.com" in url_template:
                     balance_satoshi = extract_balance_from_blockchair_json(data, address)
                 elif "mempool.space" in url_template:
                     balance_satoshi = extract_balance_from_mempool_json(data)
                 else:
-                    # general fallback
                     balance_satoshi = data.get('final_balance', data.get('balance', 0) or 0)
-
                 balance_btc = balance_satoshi / 1e8 if balance_satoshi else 0.0
                 if balance_btc > 0:
                     return True, balance_btc, api_name
-                # zero balance from this API: try next
                 break
             except requests.exceptions.RequestException as e:
                 sleep_time = (BACKOFF_BASE ** attempt) * (0.2 + random.random() * JITTER)
                 print(f"❌ Erro de conexão em {api_name}: {e}. Retentando em {sleep_time:.2f}s (attempt {attempt+1}/{MAX_RETRIES})")
                 time.sleep(sleep_time)
                 continue
-            except ValueError:
+            except Exception as e:
+                print(f"❌ Erro inesperado em {api_name}: {e}")
+                print(traceback.format_exc())
                 break
     return False, 0.0, None
 
 # -------------------------
-# Counters (thread-safe)
+# Counters
 # -------------------------
 VALID_BIP39_COUNT = 0
 FOUND_WITH_BALANCE = 0
@@ -359,20 +322,16 @@ lock_counters = threading.Lock()
 
 def check_wallet_balance_mnemonic(mnemonic):
     global VALID_BIP39_COUNT, FOUND_WITH_BALANCE, TOTAL_TESTS
-    # validate mnemonic
     if not mnemo.check(mnemonic):
         with lock_counters:
             TOTAL_TESTS += 1
         return mnemonic, False, 0.0
-
     with lock_counters:
         VALID_BIP39_COUNT += 1
         TOTAL_TESTS += 1
-
     address, wif, hex_key, pub_key = generate_key_data_from_mnemonic(mnemonic)
     if not address:
         return mnemonic, False, 0.0
-
     found, balance, api_name = query_apis_for_address(address)
     if found:
         with lock_counters:
@@ -382,7 +341,7 @@ def check_wallet_balance_mnemonic(mnemonic):
     return mnemonic, False, 0.0
 
 # -------------------------
-# Deterministic iterators
+# Iterators deterministicos
 # -------------------------
 def iter_10_plus_2_from(base_idx, var1_idx_start, var2_idx_start):
     for i in range(base_idx, len(WORDLIST)):
@@ -403,7 +362,7 @@ def iter_11_plus_1_from(base_idx, var_idx_start):
             yield i, j, mnemonic
 
 # -------------------------
-# Producers & orchestration
+# Producers / orchestration
 # -------------------------
 inflight_semaphore = threading.Semaphore(MAX_INFLIGHT_TASKS)
 futures_set_lock = threading.Lock()
@@ -469,8 +428,8 @@ def main():
     global current_pattern, MODE
     print("Inicializando realfindbitcoin.py (final)")
     ck_pattern, ck_base_word, ck_var1_idx, ck_var2_idx, counts = load_checkpoint()
+    print("Checkpoint carregado:", ck_pattern, ck_base_word, ck_var1_idx, ck_var2_idx)
 
-    # determine base idx
     if ck_base_word:
         try:
             base_idx = WORDLIST.index(ck_base_word)
@@ -479,21 +438,20 @@ def main():
     else:
         base_idx = 0
 
-    # restore counters if present
     global TOTAL_TESTS, VALID_BIP39_COUNT, FOUND_WITH_BALANCE
     if counts:
         TOTAL_TESTS = counts.get("TOTAL_TESTS", TOTAL_TESTS)
         VALID_BIP39_COUNT = counts.get("VALID_BIP39_COUNT", VALID_BIP39_COUNT)
         FOUND_WITH_BALANCE = counts.get("FOUND_WITH_BALANCE", FOUND_WITH_BALANCE)
 
-    # decide pattern order: resume pattern from checkpoint first, then other if hybrid
     if ck_pattern in ("10+2", "11+1"):
         patterns = [ck_pattern]
         if MODE == "hybrid":
             patterns.append("11+1" if ck_pattern == "10+2" else "10+2")
     else:
-        patterns = ["10+2", "11+1"] if MODE == "hybrid" else ([MODE] if MODE in ("10+2", "11+1") else ["10+2", "11+1"])
+        patterns = ["10+2", "11+1"] if MODE == "hybrid" else ([MODE] if MODE in ("10+2", "11+1") else ["10+2","11+1"])
 
+    print("Padrões a executar:", patterns, "| base_idx:", base_idx)
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     stop_event = threading.Event()
     producer_threads = []
@@ -503,11 +461,11 @@ def main():
             if pat == "10+2":
                 start_j = ck_var1_idx if ck_pattern == "10+2" else 0
                 start_k = ck_var2_idx if ck_pattern == "10+2" else 0
-                t = threading.Thread(target=producer_10_plus_2, args=(base_idx, start_j, start_k, executor, stop_event), daemon=True)
+                t = threading.Thread(target=producer_10_plus_2, args=(base_idx, start_j, start_k, executor, stop_event), daemon=False)
                 producer_threads.append(t)
             else:
                 start_j = ck_var1_idx if ck_pattern == "11+1" else 0
-                t = threading.Thread(target=producer_11_plus_1, args=(base_idx, start_j, executor, stop_event), daemon=True)
+                t = threading.Thread(target=producer_11_plus_1, args=(base_idx, start_j, executor, stop_event), daemon=False)
                 producer_threads.append(t)
 
         for t in producer_threads:
@@ -515,7 +473,6 @@ def main():
 
         last_status = time.time()
         while any(t.is_alive() for t in producer_threads) or futures_set:
-            # collect finished futures
             done_list = []
             with futures_set_lock:
                 for f in list(futures_set):
@@ -524,15 +481,13 @@ def main():
                         futures_set.remove(f)
             for f in done_list:
                 try:
-                    _ = f.result()
+                    _res = f.result()
                 except Exception as e:
                     print(f"❌ Erro em task: {e}")
 
-            # adjust API rates
             for lim in API_LIMITERS:
                 lim.adjust_rate()
 
-            # periodic status
             now = time.time()
             if now - last_status >= STATUS_INTERVAL:
                 with lock_counters:
@@ -540,7 +495,6 @@ def main():
                     inflight_used = MAX_INFLIGHT_TASKS - (inflight_semaphore._value if hasattr(inflight_semaphore,'_value') else 0)
                     print(f"[STATUS] TOTAL_TESTS={TOTAL_TESTS} | VALID_BIP39={VALID_BIP39_COUNT} | FOUND_WITH_BALANCE={FOUND_WITH_BALANCE} | inflight={inflight_used}")
                     print(f"   API rates: {rates} | Global 429s recent: {get_global_429_count()}")
-                # save checkpoint with counters
                 try:
                     patt = current_pattern if 'current_pattern' in globals() and current_pattern else patterns[0]
                     save_checkpoint(patt, WORDLIST[base_idx], 0, 0, {
@@ -557,11 +511,14 @@ def main():
     except KeyboardInterrupt:
         print("\n🛑 Interrompido pelo usuário — salvando checkpoint e saindo...")
         stop_event.set()
+    except Exception as e:
+        print("❌ Erro FATAL no main loop:", e)
+        print(traceback.format_exc())
+        stop_event.set()
     finally:
         stop_event.set()
         for t in producer_threads:
             t.join(timeout=2.0)
-        # wait a moment for inflight tasks to finish
         wait_start = time.time()
         while futures_set and time.time() - wait_start < 10.0:
             done_list = []
@@ -576,8 +533,7 @@ def main():
                 except Exception:
                     pass
             time.sleep(0.1)
-        executor.shutdown(wait=False)
-        # final checkpoint
+        executor.shutdown(wait=True)
         try:
             patt = current_pattern if 'current_pattern' in globals() and current_pattern else patterns[0]
             save_checkpoint(patt, WORDLIST[base_idx], 0, 0, {
@@ -593,8 +549,10 @@ def main():
         print(f"VALID_BIP39_COUNT = {VALID_BIP39_COUNT}")
         print(f"FOUND_WITH_BALANCE = {FOUND_WITH_BALANCE}")
 
+# -------------------------
+# Entrypoint
+# -------------------------
 if __name__ == "__main__":
-    # initialize checkpoint if missing to ensure hybrid order resumes
     if not os.path.exists(CHECKPOINT_FILE):
         save_checkpoint("10+2" if MODE == "hybrid" else MODE, WORDLIST[0], 0, 0, {
             "TOTAL_TESTS": 0, "VALID_BIP39_COUNT": 0, "FOUND_WITH_BALANCE": 0
