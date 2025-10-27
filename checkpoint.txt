@@ -1,4 +1,4 @@
 Última palavra base testada: 781 (ghost)
-Total de combinações testadas: 1597629
-Combinações válidas: 28213
+Total de combinações testadas: 1613520
+Combinações válidas: 28265
 Carteiras com saldo: 0

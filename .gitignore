@@ -22,3 +22,4 @@ Arquivos temporários de editores
 *.swp
 *.bak_pycache_/
 *.bak
+_pycache_/
