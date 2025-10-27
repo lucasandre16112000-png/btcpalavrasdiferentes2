@@ -1,5 +1,6 @@
 ESTATÍSTICAS FINAIS
 ==================================================
-Total testadas: 9305
-Válidas: 620
-Com saldo: 0
+Total de combinações testadas: 85708
+Combinações válidas (BIP39): 5322
+Carteiras com saldo encontradas: 0
+Taxa de sucesso: 0.00000000%
