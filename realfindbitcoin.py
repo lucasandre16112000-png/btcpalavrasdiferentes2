@@ -1,89 +1,126 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-gera_wallet_bip39_repeticao.py (arquivo local corrigido)
-Gera carteiras Bitcoin testando combinações de 10 palavras repetidas + 2 palavras variáveis.
-Com sistema de checkpoint baseado na última combinação testada.
+realfindbitcoin.py (CPU-ONLY otimizado)
+Mantém 100% da lógica: padrão 10 repetidas + 2 variáveis, valida BIP39,
+deriva BIP44, verifica saldo na mempool.space e salva carteiras com saldo.
+Otimizações: ProcessPoolExecutor (multiprocess), reuso de validator,
+requests.Session pooling, redução de I/O (salva ultimo.txt com frequência configurável),
+salvamentos atômicos e safe shutdown (Ctrl+C).
 """
 
 import os
 import time
+import signal
+from time import perf_counter
+from concurrent.futures import ProcessPoolExecutor
+from typing import Optional, Tuple
+
 import requests
-from bip_utils import Bip39SeedGenerator, Bip39MnemonicValidator
-from bip_utils import Bip44, Bip44Coins, Bip44Changes
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+# bip-utils imports (usados no main e no worker)
+from bip_utils import Bip39SeedGenerator, Bip39MnemonicValidator, Bip44, Bip44Coins, Bip44Changes
 
-def carregar_palavras_bip39(arquivo="bip39-words.txt"):
-    """Carrega a lista de palavras BIP39 do arquivo"""
+# -------- CONFIGURAÇÃO (ajuste conforme preferir) ----------
+BIP39_WORDS_FILE = "bip39-words.txt"
+CHECKPOINT_FILE = "checkpoint.txt"
+ULTIMO_FILE = "ultimo.txt"
+SALDO_FILE = "saldo.txt"
+ESTATISTICAS_FILE = "estatisticas_finais.txt"
+
+FREQUENCY_PRINT = 100        # print a cada N combinações
+FREQUENCY_SAVE = 100         # salvar checkpoint a cada N combinações
+SAVE_INTERVAL_SEC = 15       # ou salvar checkpoint a cada X segundos
+SAVE_ULTIMO_EVERY = 100      # salva ultimo.txt a cada N combinações (evita I/O a cada iteração)
+SAVE_ULTIMO_INTERVAL = 5.0   # ou salva ultimo após este tempo (s)
+
+USE_PROCESS_POOL = True
+CPU_WORKERS = max(1, (os.cpu_count() or 2) - 1)  # default: núcleos - 1
+# MELHORIA APLICADA: Permite forçar o número de workers via variável de ambiente (RF_CPU_WORKERS)
+CPU_WORKERS = int(os.getenv('RF_CPU_WORKERS', str(CPU_WORKERS))) 
+REQUESTS_TIMEOUT = 8
+
+# -------- HTTP session global (pooling) ---------------------
+SESSION = requests.Session()
+retries = Retry(total=3, backoff_factor=0.25, status_forcelist=(500,502,503,504))
+adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retries)
+SESSION.mount("https://", adapter)
+SESSION.mount("http://", adapter)
+
+# -------- I/O helpers atômicos ------------------------------
+def atomic_write(path: str, content: str, encoding='utf-8'):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding=encoding) as f:
+        f.write(content)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, path)
+
+def append_and_sync(path: str, text: str, encoding='utf-8'):
+    with open(path, "a", encoding=encoding) as f:
+        f.write(text)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+
+# -------- Carregamento / checkpoint -------------------------
+def carregar_palavras_bip39(arquivo=BIP39_WORDS_FILE):
     if not os.path.exists(arquivo):
         raise FileNotFoundError(f"Arquivo {arquivo} não encontrado!")
-    with open(arquivo, 'r', encoding='utf-8') as f:
-        palavras = [linha.strip() for linha in f.readlines() if linha.strip()]
+    with open(arquivo, "r", encoding="utf-8") as f:
+        palavras = [l.strip() for l in f.readlines() if l.strip()]
     if len(palavras) != 2048:
         print(f"Aviso: Esperadas 2048 palavras, encontradas {len(palavras)}")
     return palavras
 
-
-def carregar_ultima_combinacao(arquivo="ultimo.txt"):
-    """Carrega a última combinação testada do arquivo.
-    Retorna (palavra_base, palavra_completa1, palavra_completa2, mnemonic) ou (None, None, None, None)
-    Espera formato de 12 palavras: 10 repetidas + 2 variáveis.
-    """
+def carregar_ultima_combinacao(arquivo=ULTIMO_FILE) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     if not os.path.exists(arquivo):
         return None, None, None, None
     try:
-        with open(arquivo, 'r', encoding='utf-8') as f:
+        with open(arquivo, "r", encoding="utf-8") as f:
             palavras = f.read().strip().split()
             if len(palavras) == 12:
                 palavra_base = palavras[0]
-                # verificar padrão 10 repetidas
                 if all(p == palavra_base for p in palavras[:10]):
                     return palavra_base, palavras[10], palavras[11], " ".join(palavras)
     except Exception:
         pass
     return None, None, None, None
 
-
-def carregar_estatisticas_checkpoint(arquivo="checkpoint.txt"):
-    """Carrega estatísticas do arquivo checkpoint.txt"""
-    contador_total = 0
-    contador_validas = 0
-    carteiras_com_saldo = 0
+def carregar_estatisticas_checkpoint(arquivo=CHECKPOINT_FILE):
+    contador_total = contador_validas = carteiras_com_saldo = 0
     if not os.path.exists(arquivo):
-        return contador_total, contador_validas, carteiras_com_saldo
+        salvar_checkpoint(arquivo, 0, "", 0, 0, 0)
+        return 0,0,0
     try:
-        with open(arquivo, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            for line in lines:
-                line = line.strip()
+        with open(arquivo, "r", encoding="utf-8") as f:
+            for line in f:
                 if "Total de combinações testadas:" in line:
-                    try:
-                        contador_total = int(line.split(":")[1].strip())
-                    except:
-                        pass
+                    try: contador_total = int(line.split(":")[1].strip())
+                    except: contador_total = 0
                 elif "Combinações válidas:" in line:
-                    try:
-                        contador_validas = int(line.split(":")[1].strip())
-                    except:
-                        pass
+                    try: contador_validas = int(line.split(":")[1].strip())
+                    except: contador_validas = 0
                 elif "Carteiras com saldo:" in line:
-                    try:
-                        carteiras_com_saldo = int(line.split(":")[1].strip())
-                    except:
-                        pass
+                    try: carteiras_com_saldo = int(line.split(":")[1].strip())
+                    except: carteiras_com_saldo = 0
     except Exception as e:
         print(f"Erro ao ler checkpoint: {e}")
     return contador_total, contador_validas, carteiras_com_saldo
 
-
-def encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa2):
-    """Encontra a próxima combinação a ser testada a partir de (base, completa2)"""
+def encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa1):
     try:
         base_idx = palavras.index(ultima_base)
-        completa_idx = palavras.index(ultima_completa2)
-        # próxima dupla: avançar completa2 (o código gera pares j, j+1)
-        if completa_idx + 1 < len(palavras) - 0:
-            return base_idx, completa_idx + 1
+        first_idx = palavras.index(ultima_completa1)
+        if first_idx + 1 < len(palavras) - 1:
+            return base_idx, first_idx + 1
         elif base_idx + 1 < len(palavras):
             return base_idx + 1, 0
         else:
@@ -91,235 +128,246 @@ def encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa2):
     except ValueError:
         return 0, 0
 
-
-def salvar_ultima_combinacao(arquivo="ultimo.txt", palavra_base="", palavra_completa1="", palavra_completa2=""):
-    """Salva a combinação atual no arquivo (10 + 2)"""
+def salvar_ultima_combinacao(arquivo=ULTIMO_FILE, palavra_base="", palavra_completa1="", palavra_completa2=""):
     palavras = [palavra_base] * 10 + [palavra_completa1, palavra_completa2]
     mnemonic = " ".join(palavras)
-    with open(arquivo, 'w', encoding='utf-8') as f:
-        f.write(mnemonic)
+    atomic_write(arquivo, mnemonic)
 
-
-def salvar_checkpoint(arquivo="checkpoint.txt", base_idx=0, palavra_base="",
-                      contador_total=0, contador_validas=0, carteiras_com_saldo=0):
-    """Salva checkpoint com estatísticas atuais"""
-    with open(arquivo, 'w', encoding='utf-8') as f:
-        f.write(f"Última palavra base testada: {base_idx + 1} ({palavra_base})\n")
-        f.write(f"Total de combinações testadas: {contador_total}\n")
-        f.write(f"Combinações válidas: {contador_validas}\n")
-        f.write(f"Carteiras com saldo: {carteiras_com_saldo}\n")
-
-
-def criar_mnemonic_repetido(palavra_base, palavra_completa1, palavra_completa2):
-    """Cria mnemonic com palavra_base repetida 10 vezes + duas palavras variáveis finais"""
-    palavras = [palavra_base] * 10 + [palavra_completa1, palavra_completa2]
-    return " ".join(palavras)
-
-
-def validar_mnemonic(mnemonic):
-    """Valida se o mnemonic é válido segundo BIP39"""
-    try:
-        return Bip39MnemonicValidator().IsValid(mnemonic)
-    except:
-        return False
-
-
-def mnemonic_para_seed(mnemonic: str, passphrase: str = "") -> bytes:
-    """Gera seed BIP39 a partir do mnemonic"""
-    seed_gen = Bip39SeedGenerator(mnemonic)
-    return seed_gen.Generate(passphrase)
-
-
-def derivar_bip44_btc(seed: bytes):
-    """Deriva carteira BIP44 Bitcoin (m/44'/0'/0'/0/0)"""
-    bip44_mst_ctx = Bip44.FromSeed(seed, Bip44Coins.BITCOIN)
-    acct = bip44_mst_ctx.Purpose().Coin().Account(0)
-    change = acct.Change(Bip44Changes.CHAIN_EXT)
-    return change.AddressIndex(0)
-
-
-def mostrar_info(addr_index):
-    """Extrai informações da carteira"""
-    priv_key_obj = addr_index.PrivateKey()
-    pub_key_obj = addr_index.PublicKey()
-    return {
-        "priv_hex": priv_key_obj.Raw().ToHex(),
-        "wif": priv_key_obj.ToWif(),
-        "pub_compressed_hex": pub_key_obj.RawCompressed().ToHex(),
-        "address": addr_index.PublicKey().ToAddress()
-    }
-
-
-def verificar_saldo_mempool(endereco):
-    """Verifica saldo do endereço usando API da Mempool.space"""
-    try:
-        url = f"https://mempool.space/api/address/{endereco}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            saldo = data.get('chain_stats', {}).get('funded_txo_sum', 0)
-            return saldo > 0
-        return False
-    except Exception as e:
-        print(f"Erro ao verificar saldo: {e}")
-        return False
-
+def salvar_checkpoint(arquivo=CHECKPOINT_FILE, base_idx=0, palavra_base="", contador_total=0, contador_validas=0, carteiras_com_saldo=0):
+    texto = (
+        f"Última palavra base testada: {base_idx + 1} ({palavra_base})\n"
+        f"Total de combinações testadas: {contador_total}\n"
+        f"Combinações válidas: {contador_validas}\n"
+        f"Carteiras com saldo: {carteiras_com_saldo}\n"
+    )
+    atomic_write(arquivo, texto)
 
 def salvar_carteira_com_saldo(palavra_base, palavra_completa1, palavra_completa2, mnemonic, info):
-    """Salva carteira com saldo no arquivo saldo.txt"""
-    with open("saldo.txt", "a", encoding='utf-8') as f:
-        f.write(f"Palavra Base: {palavra_base} (repetida 10x)\n")
-        f.write(f"Palavras Finais: {palavra_completa1}, {palavra_completa2}\n")
-        f.write(f"Mnemonic: {mnemonic}\n")
-        f.write(f"Endereço: {info['address']}\n")
-        f.write(f"Chave Privada (WIF): {info['wif']}\n")
-        f.write(f"Chave Privada (HEX): {info['priv_hex']}\n")
-        f.write(f"Chave Pública: {info['pub_compressed_hex']}\n")
-        f.write("-" * 80 + "\n\n")
+    texto = (
+        f"Palavra Base: {palavra_base} (repetida 10x)\n"
+        f"Palavras Finais: {palavra_completa1}, {palavra_completa2}\n"
+        f"Mnemonic: {mnemonic}\n"
+        f"Endereço: {info['address']}\n"
+        f"Chave Privada (WIF): {info['wif']}\n"
+        f"Chave Privada (HEX): {info['priv_hex']}\n"
+        f"Chave Pública: {info['pub_compressed_hex']}\n"
+        + "-" * 80 + "\n\n"
+    )
+    append_and_sync(SALDO_FILE, texto)
     print("🎉 CARTEIRA COM SALDO SALVA! 🎉")
 
-
-def main():
-    """Função principal com sistema de checkpoint baseado na última combinação"""
-    # Carregar palavras BIP39
+# -------- Worker pesado (executa em processo separado) ------
+def worker_process_validation(args):
+    mnemonic, palavra_base, palavra_completa1, palavra_completa2 = args
     try:
-        palavras = carregar_palavras_bip39("bip39-words.txt")
+        from bip_utils import Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
+        import requests
+
+        seed_gen = Bip39SeedGenerator(mnemonic)
+        seed_bytes = seed_gen.Generate()
+
+        bip44_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN)
+        acct = bip44_ctx.Purpose().Coin().Account(0)
+        change = acct.Change(Bip44Changes.CHAIN_EXT)
+        addr_index = change.AddressIndex(0)
+
+        priv_key_obj = addr_index.PrivateKey()
+        pub_key_obj = addr_index.PublicKey()
+        info = {
+            "priv_hex": priv_key_obj.Raw().ToHex(),
+            "wif": priv_key_obj.ToWif(),
+            "pub_compressed_hex": pub_key_obj.RawCompressed().ToHex(),
+            "address": addr_index.PublicKey().ToAddress()
+        }
+
+        session = requests.Session()
+        try:
+            resp = session.get(f"https://mempool.space/api/address/{info['address']}", timeout=REQUESTS_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                saldo = data.get('chain_stats', {}).get('funded_txo_sum', 0)
+                tem_saldo = saldo > 0
+            else:
+                tem_saldo = False
+        except Exception:
+            tem_saldo = False
+
+        return {
+            "mnemonic": mnemonic,
+            "palavra_base": palavra_base,
+            "palavra_completa1": palavra_completa1,
+            "palavra_completa2": palavra_completa2,
+            "tem_saldo": tem_saldo,
+            "info": info if tem_saldo else None
+        }
+    except Exception as e:
+        return {
+            "mnemonic": mnemonic,
+            "palavra_base": palavra_base,
+            "palavra_completa1": palavra_completa1,
+            "palavra_completa2": palavra_completa2,
+            "tem_saldo": False,
+            "info": None,
+            "error": str(e)
+        }
+
+# -------- Signal handling para shutdown seguro -------------
+_shutdown_requested = False
+def _signal_handler(sig, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    print("\n🟡 Sinal de interrupção recebido — finalizando com segurança...")
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+# -------- Função principal ----------------------------------
+def main():
+    global _shutdown_requested
+
+    try:
+        palavras = carregar_palavras_bip39(BIP39_WORDS_FILE)
         print(f"Carregadas {len(palavras)} palavras BIP39")
     except FileNotFoundError as e:
         print(e)
         return
 
-    # Carregar última combinação testada (compatível 10+2)
-    ultima_base, ultima_completa1, ultima_completa2, ultimo_mnemonic = carregar_ultima_combinacao("ultimo.txt")
+    ultima_base, ultima_completa1, ultima_completa2, ultimo_mnemonic = carregar_ultima_combinacao(ULTIMO_FILE)
+    contador_total, contador_validas, carteiras_com_saldo = carregar_estatisticas_checkpoint(CHECKPOINT_FILE)
 
-    # Carregar estatísticas do checkpoint
-    contador_total, contador_validas, carteiras_com_saldo = carregar_estatisticas_checkpoint("checkpoint.txt")
+    print("\nEstatísticas carregadas:")
+    print(f"  Total testadas: {contador_total}")
+    print(f"  Válidas: {contador_validas}")
+    print(f"  Com saldo: {carteiras_com_saldo}\n")
 
-    print("Estatísticas carregadas:")
-    print(f"  Total de combinações testadas: {contador_total}")
-    print(f"  Combinações válidas: {contador_validas}")
-    print(f"  Carteiras com saldo: {carteiras_com_saldo}")
-
-    # Determinar ponto de partida
     if ultima_base and ultima_completa1 and ultima_completa2:
         print(f"Última combinação testada: {ultimo_mnemonic}")
-        base_idx, completa_idx = encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa2)
+        base_idx, completa_idx = encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa1)
         if base_idx is None:
             print("Todas as combinações já foram testadas!")
             return
     else:
-        print("Nenhum checkpoint encontrado, começando do início...")
+        print("Nenhum checkpoint encontrado, começando do início...\n")
         base_idx, completa_idx = 0, 0
 
-    print(f"Continuando da posição: palavra base #{base_idx+1} ('{palavras[base_idx]}'), variação #{completa_idx+1}")
+    print(f"Continuando de '{palavras[base_idx]}' (base), iniciando variação #{completa_idx+1}")
+    print("\nIniciando geração de combinações 10+2 BIP39...\n")
 
-    print("\nIniciando teste de combinações BIP39...")
-    print("Padrão: 10 palavras repetidas + 2 variáveis")
-    print("Verificando saldo na Mempool.space (Timeout: 10s)")
-    print("Carteiras com saldo serão salvas em saldo.txt")
-    print("Última combinação salva em ultimo.txt")
-    print("Checkpoint salvo em checkpoint.txt")
-    print("Pressione Ctrl+C para parar\n")
+    validator = Bip39MnemonicValidator()
+    t0 = perf_counter()
+    ultimo_salvamento_tempo = time.time()
+    last_save_ultimo_time = time.time()
+    combos_since_last = 0
 
-    ultimo_salvamento = time.time()
+    stats_validas = contador_validas
+    stats_saldos = carteiras_com_saldo
+
+    executor = ProcessPoolExecutor(max_workers=CPU_WORKERS) if USE_PROCESS_POOL else None
+    pending_futures = []
 
     try:
-        # Iterar a partir do ponto atual
         for i in range(base_idx, len(palavras)):
+            if _shutdown_requested:
+                break
             palavra_base = palavras[i]
-
-            # Determinar índice inicial para palavra completa
+            base_prefix = " ".join([palavra_base] * 10)
             start_j = completa_idx if i == base_idx else 0
 
-            # percorre j até len-1 para usar j and j+1
             for j in range(start_j, len(palavras) - 1):
+                if _shutdown_requested:
+                    break
+
                 palavra_completa1 = palavras[j]
                 palavra_completa2 = palavras[j + 1]
                 contador_total += 1
 
-                # Criar mnemonic 10+2
-                mnemonic = criar_mnemonic_repetido(palavra_base, palavra_completa1, palavra_completa2)
+                mnemonic = f"{base_prefix} {palavra_completa1} {palavra_completa2}"
 
-                # Salvar combinação atual no arquivo (10+2)
-                salvar_ultima_combinacao("ultimo.txt", palavra_base, palavra_completa1, palavra_completa2)
+                combos_since_last += 1
+                now = time.time()
+                if combos_since_last >= SAVE_ULTIMO_EVERY or (now - last_save_ultimo_time) >= SAVE_ULTIMO_INTERVAL:
+                    salvar_ultima_combinacao(ULTIMO_FILE, palavra_base, palavra_completa1, palavra_completa2)
+                    combos_since_last = 0
+                    last_save_ultimo_time = now
 
-                # Salvar checkpoint a cada 30 segundos ou 100 combinações
-                tempo_atual = time.time()
-                if tempo_atual - ultimo_salvamento > 30 or contador_total % 100 == 0:
-                    salvar_checkpoint("checkpoint.txt", i, palavra_base,
-                                      contador_total, contador_validas, carteiras_com_saldo)
-                    ultimo_salvamento = tempo_atual
+                if now - ultimo_salvamento_tempo > SAVE_INTERVAL_SEC or contador_total % FREQUENCY_SAVE == 0:
+                    salvar_checkpoint(CHECKPOINT_FILE, i, palavra_base, contador_total, stats_validas, stats_saldos)
+                    ultimo_salvamento_tempo = now
 
-                # Exibir progresso a cada 100 combinações
-                if contador_total % 100 == 0:
+                if contador_total % FREQUENCY_PRINT == 0:
+                    elapsed = perf_counter() - t0
+                    rate = contador_total / elapsed if elapsed > 0 else 0.0
                     print(f"Testadas {contador_total} combinações | Última: {mnemonic}")
+                    print(f"  Válidas (até agora): {stats_validas} | Com saldo: {stats_saldos} | {rate:.2f} combos/s")
 
-                # Validar mnemonic
-                if validar_mnemonic(mnemonic):
-                    contador_validas += 1
+                try:
+                    is_valid = validator.IsValid(mnemonic)
+                except Exception:
+                    is_valid = False
 
-                    # Gerar carteira
-                    seed = mnemonic_para_seed(mnemonic)
-                    addr_index = derivar_bip44_btc(seed)
-                    info = mostrar_info(addr_index)
+                if is_valid:
+                    if executor:
+                        fut = executor.submit(worker_process_validation, (mnemonic, palavra_base, palavra_completa1, palavra_completa2))
+                        pending_futures.append(fut)
+                    else:
+                        res = worker_process_validation((mnemonic, palavra_base, palavra_completa1, palavra_completa2))
+                        if res.get("tem_saldo"):
+                            stats_saldos += 1
+                            salvar_carteira_com_saldo(res["palavra_base"], res["palavra_completa1"], res["palavra_completa2"], res["mnemonic"], res["info"])
+                        stats_validas += 1
 
-                    # Verificar saldo
-                    tem_saldo = verificar_saldo_mempool(info["address"])
+                if pending_futures and (len(pending_futures) >= 50 or contador_total % (FREQUENCY_PRINT*2) == 0):
+                    done_now = []
+                    for f in list(pending_futures):
+                        if f.done():
+                            try:
+                                r = f.result(timeout=0)
+                            except Exception:
+                                r = {"tem_saldo": False}
+                            if r.get("tem_saldo"):
+                                stats_saldos += 1
+                                salvar_carteira_com_saldo(r["palavra_base"], r["palavra_completa1"], r["palavra_completa2"], r["mnemonic"], r["info"])
+                            if r.get("mnemonic"):
+                                stats_validas += 1
+                            done_now.append(f)
+                    for f in done_now:
+                        try:
+                            pending_futures.remove(f)
+                        except ValueError:
+                            pass
 
-                    # Exibir progresso a cada 100 combinações válidas
-                    if contador_validas % 100 == 0:
-                        print(f"\nProgresso: {contador_validas} combinações válidas testadas")
-                        print(f"Última válida: {mnemonic}")
-                        print(f"Endereço: {info['address']}")
-                        print(f"Saldo: {'SIM' if tem_saldo else 'NÃO'}")
-                        print("-" * 50)
-
-                    # Se tem saldo, salvar
-                    if tem_saldo:
-                        carteiras_com_saldo += 1
-                        salvar_carteira_com_saldo(palavra_base, palavra_completa1, palavra_completa2, mnemonic, info)
-
-                    # Aguardar para não sobrecarregar a API
-                    time.sleep(0.1)
-
-            # Resetar índice da palavra completa após processar a primeira palavra base
             completa_idx = 0
+            salvar_checkpoint(CHECKPOINT_FILE, i, palavra_base, contador_total, stats_validas, stats_saldos)
+            print(f"\nConcluído para '{palavra_base}': {stats_validas} válidas, {stats_saldos} com saldo\n")
 
-            # Salvar checkpoint após cada palavra base
-            salvar_checkpoint("checkpoint.txt", i, palavra_base,
-                              contador_total, contador_validas, carteiras_com_saldo)
-
-            # Status após cada palavra base
-            print(f"\nConcluído para '{palavra_base}': {contador_validas} válidas, {carteiras_com_saldo} com saldo")
-
-    except KeyboardInterrupt:
-        print("\n\nPrograma interrompido pelo usuário")
-        # Salvar checkpoint final antes de sair
-        if 'i' in locals() and 'palavra_base' in locals():
-            salvar_checkpoint("checkpoint.txt", i, palavra_base,
-                              contador_total, contador_validas, carteiras_com_saldo)
+    except Exception as e:
+        print(f"[main] Erro inesperado: {e}")
 
     finally:
-        # Salvar estatísticas finais
-        with open("estatisticas_finais.txt", "w", encoding='utf-8') as f:
-            f.write("ESTATÍSTICAS FINAIS\n")
-            f.write("=" * 50 + "\n")
-            f.write(f"Total de combinações testadas: {contador_total}\n")
-            f.write(f"Combinações válidas (BIP39): {contador_validas}\n")
-            f.write(f"Carteiras com saldo encontradas: {carteiras_com_saldo}\n")
-            if contador_validas > 0:
-                f.write(f"Taxa de sucesso: {(carteiras_com_saldo/contador_validas)*100:.8f}%\n")
-            else:
-                f.write("Taxa de sucesso: 0%\n")
+        if executor:
+            print("🟢 Aguardando finalização das tasks pendentes do pool...")
+            for f in pending_futures:
+                try:
+                    r = f.result(timeout=30)
+                    if r.get("tem_saldo"):
+                        stats_saldos += 1
+                        salvar_carteira_com_saldo(r["palavra_base"], r["palavra_completa1"], r["palavra_completa2"], r["mnemonic"], r["info"])
+                    if r.get("mnemonic"):
+                        stats_validas += 1
+                except Exception:
+                    pass
+            executor.shutdown(wait=True)
 
-        print(f"\n--- ESTATÍSTICAS FINAIS ---")
-        print(f"Total de combinações testadas: {contador_total}")
-        print(f"Combinações válidas (BIP39): {contador_validas}")
-        print(f"Carteiras com saldo encontradas: {carteiras_com_saldo}")
-        if contador_validas > 0:
-            print(f"Taxa de sucesso: {(carteiras_com_saldo/contador_validas)*100:.8f}%")
-        else:
-            print("Taxa de sucesso: 0%")
+        salvar_checkpoint(CHECKPOINT_FILE, i if 'i' in locals() else 0, palavra_base if 'palavra_base' in locals() else "", contador_total, stats_validas, stats_saldos)
+
+        with open(ESTATISTICAS_FILE, "w", encoding='utf-8') as f:
+            f.write("ESTATÍSTICAS FINAIS\n" + "="*50 + "\n")
+            f.write(f"Total testadas: {contador_total}\n")
+            f.write(f"Válidas: {stats_validas}\n")
+            f.write(f"Com saldo: {stats_saldos}\n")
+
+        print("\n✅ Execução finalizada. Estatísticas gravadas em", ESTATISTICAS_FILE)
+        print(f"Total testadas: {contador_total} | Válidas: {stats_validas} | Com saldo: {stats_saldos}")
 
 if __name__ == "__main__":
     main()
