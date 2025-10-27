@@ -1,585 +1,415 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-realfindbitcoin.py — versão final ajustada para feedback imediato
-Mantém toda a lógica: 10+2 & 11+1 paralelos, rate-limiters por API, checkpoint tolerante,
-contadores restaurados e prevenção de 429. Apenas adiciona prints imediatos para diagnóstico.
+Bitcoin Wallet Finder - Versão Otimizada e Assíncrona
+Suporta modos: 11+1 e 10+2
+Autor: Otimizado por Manus AI
 """
+
+import asyncio
 import os
 import time
-import random
-import threading
-import traceback
-from concurrent.futures import ThreadPoolExecutor
-import requests
-import hmac
-import hashlib
-from mnemonic import Mnemonic
-from bitcoin import privtopub, pubtoaddr, encode_privkey
+import json
+import httpx
+from bip_utils import (
+    Bip39SeedGenerator, Bip39MnemonicValidator,
+    Bip44, Bip44Coins, Bip44Changes
+)
+from typing import List, Tuple, Optional
 
-# -------------------------
-# CONFIGURAÇÃO (ajuste se quiser)
-# -------------------------
-MODE = "hybrid"  # '10+2', '11+1', or 'hybrid' (runs 10+2 then 11+1)
-mnemo = Mnemonic('english')
-WORDLIST = mnemo.wordlist
+# --- CONFIGURAÇÕES GLOBAIS ---
+# Limite de requisições simultâneas para a API da Mempool.space
+# Ajuste este valor para equilibrar velocidade e evitar 429
+CONCURRENCY_LIMIT = 5 
+# Tempo de espera inicial em caso de 429 (será dobrado a cada tentativa)
+INITIAL_BACKOFF_DELAY = 1.0 
+MAX_RETRIES = 5
 
-# APIs (template, initial_tps, max_tps)
-API_DEFINITIONS = [
-    ("https://api.blockchair.com/bitcoin/dashboards/address/{}", 2.0, 2.5),  # Blockchair
-    ("https://mempool.space/api/address/{}", 1.8, 2.0),                    # mempool.space
-]
+# Semáforo para controlar a concorrência
+semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-CHECKPOINT_FILE = "checkpoint.txt"
-ULTIMO_FILE = "ultimo.txt"
-SALDO_FILE = "saldo.txt"
+# --- FUNÇÕES DE UTILIDADE E CHECKPOINT ---
 
-MAX_WORKERS = 3
-MAX_INFLIGHT_TASKS = MAX_WORKERS * 3
-
-MAX_RETRIES = 6
-BACKOFF_BASE = 2.0
-JITTER = 0.25
-
-RATE_ADJUST_WINDOW = 30.0
-GLOBAL_429_THRESHOLD = 8
-GLOBAL_PAUSE_SECONDS = 20.0
-
-STATUS_INTERVAL = 3.0  # reduzido para feedback mais rápido
-
-# -------------------------
-# Helpers checkpoint (tolerante)
-# -------------------------
-def to_int_safe(s):
-    try:
-        return int(s)
-    except Exception:
+def carregar_palavras_bip39(arquivo="bip39-words.txt") -> List[str]:
+    """Carrega a lista de palavras BIP39 do arquivo"""
+    if not os.path.exists(arquivo):
+        # Tenta criar um arquivo bip39-words.txt se não existir
         try:
-            return int(float(s))
-        except Exception:
-            return 0
+            from bip_utils.bip.bip39 import Bip39WordsNum
+            from bip_utils import Bip39Languages
+            palavras = Bip39WordsNum.FromWordsNumber(2048).GetList(Bip39Languages.ENGLISH)
+            with open(arquivo, 'w') as f:
+                f.write('\n'.join(palavras))
+            print(f"✓ Arquivo '{arquivo}' criado com a lista BIP39 padrão em inglês.")
+            return list(palavras)
+        except Exception as e:
+            raise FileNotFoundError(f"Arquivo {arquivo} não encontrado e não foi possível gerar a lista padrão: {e}")
+    
+    with open(arquivo, 'r') as f:
+        palavras = [linha.strip() for linha in f.readlines() if linha.strip()]
+    
+    if len(palavras) != 2048:
+        print(f"⚠ Aviso: Esperadas 2048 palavras, encontradas {len(palavras)}")
+    
+    return palavras
 
-def save_checkpoint(pattern, base_word, var1_idx, var2_idx, counts=None):
+def carregar_checkpoint(arquivo="checkpoint.json") -> Tuple[int, int, int, Optional[str], Optional[str], Optional[str]]:
+    """Carrega estatísticas e a última combinação testada do arquivo JSON"""
+    if not os.path.exists(arquivo):
+        return 0, 0, 0, None, None, None
+
     try:
-        with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
-            f.write(f"{pattern}\n{base_word}\n{var1_idx}\n{var2_idx}\n{time.time()}\n")
-            if counts:
-                f.write(f"{counts.get('TOTAL_TESTS',0)}\n{counts.get('VALID_BIP39_COUNT',0)}\n{counts.get('FOUND_WITH_BALANCE',0)}\n")
+        with open(arquivo, 'r') as f:
+            data = json.load(f)
+            contador_total = data.get('contador_total', 0)
+            contador_validas = data.get('contador_validas', 0)
+            carteiras_com_saldo = data.get('carteiras_com_saldo', 0)
+            palavra_base = data.get('palavra_base')
+            palavra_var1 = data.get('palavra_var1')
+            palavra_var2 = data.get('palavra_var2')
+            return contador_total, contador_validas, carteiras_com_saldo, palavra_base, palavra_var1, palavra_var2
     except Exception as e:
-        print(f"❌ Erro ao salvar checkpoint: {e}")
+        print(f"❌ Erro ao ler checkpoint: {e}. Reiniciando do zero.")
+        return 0, 0, 0, None, None, None
 
-def load_checkpoint():
-    if not os.path.exists(CHECKPOINT_FILE):
-        return None, None, 0, 0, None
+def salvar_checkpoint(arquivo: str, contador_total: int, contador_validas: int, carteiras_com_saldo: int,
+                      palavra_base: str, palavra_var1: str, palavra_var2: Optional[str] = None):
+    """Salva checkpoint com estatísticas atuais e a última combinação testada"""
+    data = {
+        'contador_total': contador_total,
+        'contador_validas': contador_validas,
+        'carteiras_com_saldo': carteiras_com_saldo,
+        'palavra_base': palavra_base,
+        'palavra_var1': palavra_var1,
+        'palavra_var2': palavra_var2
+    }
+    with open(arquivo, 'w') as f:
+        json.dump(data, f, indent=4)
+
+# --- FUNÇÕES DE CRIAÇÃO E VERIFICAÇÃO DE MNEMONIC ---
+
+def criar_mnemonic(palavra_base: str, palavra_var1: str, palavra_var2: Optional[str], modo: str) -> str:
+    """Cria mnemonic baseado no modo (11+1 ou 10+2)"""
+    if modo == "11+1":
+        # 11 palavras base + 1 variável (palavra_var1)
+        palavras = [palavra_base] * 11 + [palavra_var1]
+    elif modo == "10+2":
+        # 10 palavras base + 2 variáveis (palavra_var1 e palavra_var2)
+        if palavra_var2 is None:
+            raise ValueError("Modo 10+2 requer palavra_var2")
+        palavras = [palavra_base] * 10 + [palavra_var1, palavra_var2]
+    else:
+        raise ValueError("Modo inválido. Use '11+1' ou '10+2'")
+    
+    return " ".join(palavras)
+
+def validar_mnemonic(mnemonic: str) -> bool:
+    """Valida se o mnemonic é válido segundo BIP39"""
     try:
-        with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
-            lines = [l.strip() for l in f.readlines() if l.strip()]
-            if len(lines) >= 4:
-                pattern = lines[0]
-                base_word = lines[1]
-                var1_idx = to_int_safe(lines[2])
-                var2_idx = to_int_safe(lines[3])
-                counts = None
-                if len(lines) >= 7:
-                    counts = {
-                        "TOTAL_TESTS": to_int_safe(lines[4]),
-                        "VALID_BIP39_COUNT": to_int_safe(lines[5]),
-                        "FOUND_WITH_BALANCE": to_int_safe(lines[6])
-                    }
-                return pattern, base_word, var1_idx, var2_idx, counts
-    except Exception as e:
-        print(f"❌ Erro ao carregar checkpoint: {e}")
-        print(traceback.format_exc())
-    return None, None, 0, 0, None
+        return Bip39MnemonicValidator().IsValid(mnemonic)
+    except:
+        return False
 
-def save_last_combo(mnemonic):
-    try:
-        with open(ULTIMO_FILE, "w", encoding="utf-8") as f:
-            f.write(mnemonic + "\n")
-    except Exception as e:
-        print(f"❌ Erro ao salvar ultimo mnemonic: {e}")
+# --- FUNÇÕES DE DERIVAÇÃO DE CARTEIRA BIP44 ---
 
-def save_wallet_with_balance(mnemonic, address, wif, hex_key, pub_key, balance, api_name):
-    try:
-        with open(SALDO_FILE, "a", encoding="utf-8") as f:
-            f.write("="*80 + "\n")
-            f.write("💎 CARTEIRA COM SALDO ENCONTRADA\n")
-            f.write(f"Pattern: {current_pattern}\n")
-            f.write(f"Mnemonic: {mnemonic}\n")
-            f.write(f"Endereço: {address}\n")
-            f.write(f"Saldo: {balance:.8f} BTC (API: {api_name})\n")
-            f.write(f"WIF: {wif}\n")
-            f.write(f"PrivHex: {hex_key}\n")
-            f.write(f"PubKey: {pub_key}\n")
-            f.write("-"*80 + "\n\n")
-    except Exception as e:
-        print(f"❌ Erro ao salvar carteira com saldo: {e}")
+def mnemonic_para_seed(mnemonic: str) -> bytes:
+    """Converte mnemonic para seed bytes"""
+    return Bip39SeedGenerator(mnemonic).Generate()
 
-# -------------------------
-# ApiLimiter (token bucket) com cap
-# -------------------------
-class ApiLimiter:
-    def __init__(self, initial_rate, max_rate):
-        self.rate = float(max(0.01, initial_rate))
-        self.max_rate = float(max_rate)
-        self.capacity = max(1.0, self.rate)
-        self.tokens = self.capacity
-        self.last = time.time()
-        self.lock = threading.Lock()
-        self.recent_429 = []
+def derivar_bip44_btc(seed: bytes):
+    """Deriva endereço Bitcoin usando BIP44 (m/44'/0'/0'/0/0)"""
+    bip44_mst_ctx = Bip44.FromSeed(seed, Bip44Coins.BITCOIN)
+    acct = bip44_mst_ctx.Purpose().Coin().Account(0)
+    change = acct.Change(Bip44Changes.CHAIN_EXT)
+    return change.AddressIndex(0)
 
-    def acquire(self):
-        while True:
-            with self.lock:
-                now = time.time()
-                delta = now - self.last
-                if delta > 0:
-                    self.tokens = min(self.capacity, self.tokens + delta * self.rate)
-                    self.last = now
-                if self.tokens >= 1.0:
-                    self.tokens -= 1.0
-                    return
-                needed = (1.0 - self.tokens) / max(self.rate, 1e-9)
-            time.sleep(max(0.01, needed * 0.5) + random.uniform(0, 0.01))
+def mostrar_info(addr_index, mnemonic: str, palavra_base: str, palavra_var1: str, palavra_var2: Optional[str]):
+    """Extrai informações da carteira e formata para salvamento"""
+    priv_key_obj = addr_index.PrivateKey()
+    pub_key_obj = addr_index.PublicKey()
+    
+    return {
+        "palavra_base": palavra_base,
+        "palavra_var1": palavra_var1,
+        "palavra_var2": palavra_var2,
+        "mnemonic": mnemonic,
+        "address": addr_index.PublicKey().ToAddress(),
+        "wif": priv_key_obj.ToWif(),
+        "priv_hex": priv_key_obj.Raw().ToHex(),
+        "pub_compressed_hex": pub_key_obj.RawCompressed().ToHex(),
+    }
 
-    def note_429(self):
-        with self.lock:
-            ts = time.time()
-            self.recent_429.append(ts)
-            cutoff = ts - RATE_ADJUST_WINDOW
-            self.recent_429 = [t for t in self.recent_429 if t >= cutoff]
+# --- FUNÇÕES DE REDE ASSÍNCRONA COM RATE LIMITING E BACKOFF ---
 
-    def get_recent_429_count(self):
-        with self.lock:
-            ts = time.time()
-            cutoff = ts - RATE_ADJUST_WINDOW
-            self.recent_429 = [t for t in self.recent_429 if t >= cutoff]
-            return len(self.recent_429)
+async def verificar_saldo_mempool_async(client: httpx.AsyncClient, endereco: str) -> bool:
+    """Verifica saldo do endereço usando API da Mempool.space com retry e backoff"""
+    url = f"https://mempool.space/api/address/{endereco}"
+    delay = INITIAL_BACKOFF_DELAY
 
-    def adjust_rate(self):
-        with self.lock:
-            recent = self.get_recent_429_count()
-            if recent >= 3:
-                new_rate = max(0.05, self.rate * 0.35)
-            elif recent > 0:
-                new_rate = max(0.05, self.rate * 0.6)
-            else:
-                new_rate = min(self.max_rate, self.rate * 1.04 + 0.01)
-            if abs(new_rate - self.rate) / max(self.rate, 1e-9) > 0.01:
-                prop = self.tokens / self.capacity if self.capacity > 0 else 1.0
-                self.rate = new_rate
-                self.capacity = max(1.0, self.rate)
-                self.tokens = min(self.capacity, prop * self.capacity)
-
-API_LIMITERS = [ApiLimiter(init, maxr) for (_, init, maxr) in API_DEFINITIONS]
-GLOBAL_429_HISTORY = []
-GLOBAL_429_LOCK = threading.Lock()
-
-def global_note_429():
-    with GLOBAL_429_LOCK:
-        ts = time.time()
-        GLOBAL_429_HISTORY.append(ts)
-        cutoff = ts - RATE_ADJUST_WINDOW
-        GLOBAL_429_HISTORY[:] = [t for t in GLOBAL_429_HISTORY if t >= cutoff]
-
-def get_global_429_count():
-    with GLOBAL_429_LOCK:
-        ts = time.time()
-        cutoff = ts - RATE_ADJUST_WINDOW
-        GLOBAL_429_HISTORY[:] = [t for t in GLOBAL_429_HISTORY if t >= cutoff]
-        return len(GLOBAL_429_HISTORY)
-
-# -------------------------
-# HTTP session
-# -------------------------
-session = requests.Session()
-adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
-session.mount("https://", adapter)
-session.mount("http://", adapter)
-session.headers.update({"User-Agent": "realfindbitcoin/1.0"})
-
-# -------------------------
-# key derivation
-# -------------------------
-def generate_key_data_from_mnemonic(mnemonic):
-    try:
-        seed = mnemo.to_seed(mnemonic, passphrase="")
-        I = hmac.new(b"Bitcoin seed", seed, hashlib.sha512).digest()
-        master_priv_key = I[:32]
-        wif = encode_privkey(master_priv_key, 'wif_compressed')
-        pub_key = privtopub(master_priv_key)
-        address = pubtoaddr(pub_key)
-        hex_key = master_priv_key.hex()
-        return address, wif, hex_key, pub_key
-    except Exception:
-        return None, None, None, None
-
-# -------------------------
-# API response extractors
-# -------------------------
-def extract_balance_from_blockchair_json(data, address):
-    try:
-        d = data.get("data", {})
-        if address in d:
-            addr_info = d[address].get("address", {})
-            bal = addr_info.get("balance")
-            if bal is None:
-                bal = d[address].get("balance")
-            return int(bal) if bal is not None else 0
-    except Exception:
-        pass
-    try:
-        for v in data.get("data", {}).values():
-            if isinstance(v, dict):
-                for sub in v.values():
-                    if isinstance(sub, dict) and 'balance' in sub:
-                        return int(sub.get('balance', 0) or 0)
-    except Exception:
-        pass
-    return 0
-
-def extract_balance_from_mempool_json(data):
-    try:
-        chain = data.get("chain_stats", {})
-        funded = chain.get("funded_txo_sum", 0)
-        spent = chain.get("spent_txo_sum", 0)
-        return max(0, int(funded) - int(spent))
-    except Exception:
-        pass
-    try:
-        return int(data.get("balance", 0) or 0)
-    except Exception:
-        return 0
-
-# -------------------------
-# API query
-# -------------------------
-def query_apis_for_address(address):
-    for idx, (url_template, _, _) in enumerate(API_DEFINITIONS):
-        limiter = API_LIMITERS[idx]
-        api_name = url_template.split("//")[1].split("/")[0]
-        for attempt in range(MAX_RETRIES):
-            if get_global_429_count() >= GLOBAL_429_THRESHOLD:
-                print(f"🟠 Muitas 429s globais ({get_global_429_count()}) — pausa global {int(GLOBAL_PAUSE_SECONDS)}s.")
-                time.sleep(GLOBAL_PAUSE_SECONDS)
-                for lim in API_LIMITERS:
-                    lim.adjust_rate()
-            limiter.acquire()
+    for attempt in range(MAX_RETRIES):
+        async with semaphore:
             try:
-                url = url_template.format(address)
-                resp = session.get(url, timeout=12)
-                if resp.status_code == 429:
-                    limiter.note_429()
-                    global_note_429()
-                    retry_after = None
-                    if 'Retry-After' in resp.headers:
-                        try:
-                            retry_after = float(resp.headers.get('Retry-After'))
-                        except Exception:
-                            retry_after = None
-                    if retry_after and retry_after > 0:
-                        sleep_time = retry_after + random.uniform(0.1, 0.6)
-                    else:
-                        sleep_time = (BACKOFF_BASE ** attempt) * (0.5 + random.random() * JITTER)
-                    print(f"🟡 429 em {api_name}: backoff {sleep_time:.2f}s (attempt {attempt+1}/{MAX_RETRIES})")
-                    time.sleep(sleep_time)
-                    limiter.adjust_rate()
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                balance_satoshi = 0
-                if "blockchair.com" in url_template:
-                    balance_satoshi = extract_balance_from_blockchair_json(data, address)
-                elif "mempool.space" in url_template:
-                    balance_satoshi = extract_balance_from_mempool_json(data)
+                response = await client.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # A API da Mempool.space retorna 'chain_stats' com 'funded_txo_sum'
+                    funded_sum = data.get('chain_stats', {}).get('funded_txo_sum', 0)
+                    return funded_sum > 0
+                
+                elif response.status_code == 429:
+                    print(f"🟡 AVISO (429 - Mempool.space): Backoff ativado. Tentando novamente em {delay:.2f}s (Tentativa {attempt + 1}/{MAX_RETRIES}).")
+                    await asyncio.sleep(delay)
+                    delay *= 2 # Exponential backoff
+                
                 else:
-                    balance_satoshi = data.get('final_balance', data.get('balance', 0) or 0)
-                balance_btc = balance_satoshi / 1e8 if balance_satoshi else 0.0
-                if balance_btc > 0:
-                    return True, balance_btc, api_name
-                break
-            except requests.exceptions.RequestException as e:
-                sleep_time = (BACKOFF_BASE ** attempt) * (0.2 + random.random() * JITTER)
-                print(f"❌ Erro de conexão em {api_name}: {e}. Retentando em {sleep_time:.2f}s (attempt {attempt+1}/{MAX_RETRIES})")
-                time.sleep(sleep_time)
-                continue
+                    # Tratar outros erros de API
+                    print(f"⚠ Erro de API ({response.status_code}) ao verificar {endereco}")
+                    return False
+
+            except httpx.ConnectError as e:
+                print(f"⚠ Erro de conexão ao verificar {endereco}. Tentando novamente em {delay:.2f}s.")
+                await asyncio.sleep(delay)
+                delay *= 2
             except Exception as e:
-                print(f"❌ Erro inesperado em {api_name}: {e}")
-                print(traceback.format_exc())
-                break
-    return False, 0.0, None
+                print(f"❌ Erro inesperado ao verificar saldo: {e}")
+                return False
+    
+    print(f"❌ ERRO CRÍTICO: Falha ao verificar saldo para {endereco} após {MAX_RETRIES} tentativas.")
+    return False
 
-# -------------------------
-# Counters
-# -------------------------
-VALID_BIP39_COUNT = 0
-FOUND_WITH_BALANCE = 0
-TOTAL_TESTS = 0
-lock_counters = threading.Lock()
+async def processar_combinacao(client: httpx.AsyncClient, mnemonic: str, palavra_base: str, palavra_var1: str, palavra_var2: Optional[str], modo: str):
+    """Processa uma combinação válida: deriva carteira e verifica saldo"""
+    
+    # Gerar carteira
+    seed = mnemonic_para_seed(mnemonic)
+    addr_index = derivar_bip44_btc(seed)
+    info = mostrar_info(addr_index, mnemonic, palavra_base, palavra_var1, palavra_var2)
+    
+    # Verificar saldo de forma assíncrona
+    tem_saldo = await verificar_saldo_mempool_async(client, info["address"])
+    
+    return info, tem_saldo
 
-def check_wallet_balance_mnemonic(mnemonic):
-    global VALID_BIP39_COUNT, FOUND_WITH_BALANCE, TOTAL_TESTS
-    if not mnemo.check(mnemonic):
-        with lock_counters:
-            TOTAL_TESTS += 1
-        return mnemonic, False, 0.0
-    with lock_counters:
-        VALID_BIP39_COUNT += 1
-        TOTAL_TESTS += 1
-    address, wif, hex_key, pub_key = generate_key_data_from_mnemonic(mnemonic)
-    if not address:
-        return mnemonic, False, 0.0
-    found, balance, api_name = query_apis_for_address(address)
-    if found:
-        with lock_counters:
-            FOUND_WITH_BALANCE += 1
-        save_wallet_with_balance(mnemonic, address, wif, hex_key, pub_key, balance, api_name)
-        return mnemonic, True, balance
-    return mnemonic, False, 0.0
+def salvar_carteira_com_saldo(info: dict):
+    """Salva carteira com saldo no arquivo saldo.txt"""
+    with open("saldo.txt", "a") as f:
+        f.write("=" * 80 + "\n")
+        f.write("💎 CARTEIRA COM SALDO ENCONTRADA - DETALHES COMPLETOS 💎\n")
+        f.write(f"Palavra Base: {info['palavra_base']}\n")
+        f.write(f"Palavra Variável 1: {info['palavra_var1']}\n")
+        if info['palavra_var2']:
+            f.write(f"Palavra Variável 2: {info['palavra_var2']}\n")
+        f.write(f"Mnemonic: {info['mnemonic']}\n")
+        f.write(f"Endereço: {info['address']}\n")
+        f.write(f"Chave Privada (WIF): {info['wif']}\n")
+        f.write(f"Chave Privada (HEX): {info['priv_hex']}\n")
+        f.write(f"Chave Pública: {info['pub_compressed_hex']}\n")
+        f.write("=" * 80 + "\n\n")
+    print("\n🎉 CARTEIRA COM SALDO SALVA! 🎉")
 
-# -------------------------
-# Iterators deterministicos
-# -------------------------
-def iter_10_plus_2_from(base_idx, var1_idx_start, var2_idx_start):
-    for i in range(base_idx, len(WORDLIST)):
-        base_word = WORDLIST[i]
-        start_j = var1_idx_start if i == base_idx else 0
-        for j in range(start_j, len(WORDLIST)):
-            start_k = var2_idx_start if (i == base_idx and j == start_j) else 0
-            for k in range(start_k, len(WORDLIST)):
-                mnemonic = " ".join([base_word]*10 + [WORDLIST[j], WORDLIST[k]])
-                yield i, j, k, mnemonic
+# --- FUNÇÃO PRINCIPAL ---
 
-def iter_11_plus_1_from(base_idx, var_idx_start):
-    for i in range(base_idx, len(WORDLIST)):
-        base_word = WORDLIST[i]
-        start_j = var_idx_start if i == base_idx else 0
-        for j in range(start_j, len(WORDLIST)):
-            mnemonic = " ".join([base_word]*11 + [WORDLIST[j]])
-            yield i, j, mnemonic
-
-# -------------------------
-# Producers / orchestration
-# -------------------------
-inflight_semaphore = threading.Semaphore(MAX_INFLIGHT_TASKS)
-futures_set_lock = threading.Lock()
-futures_set = set()
-
-def _task_wrapper(mnemonic):
+async def main_async():
+    """Função principal assíncrona para processamento rápido"""
+    
+    # --- Configuração Inicial ---
+    print("=" * 80)
+    print("🔍 BITCOIN WALLET FINDER - Versão Otimizada")
+    print("=" * 80)
+    
     try:
-        return check_wallet_balance_mnemonic(mnemonic)
-    finally:
-        try:
-            inflight_semaphore.release()
-        except Exception:
-            pass
+        palavras = carregar_palavras_bip39("bip39-words.txt")
+        print(f"✓ Carregadas {len(palavras)} palavras BIP39.")
+    except FileNotFoundError as e:
+        print(e)
+        return
 
-def producer_10_plus_2(start_base_idx, start_j, start_k, executor, stop_event):
-    global current_pattern
-    current_pattern = "10+2"
-    print("Producer 10+2 starting...")
-    for i, j, k, mnemonic in iter_10_plus_2_from(start_base_idx, start_j, start_k):
-        if stop_event.is_set():
-            print("Producer 10+2 stop_event set, exiting")
-            break
-        inflight_semaphore.acquire()
-        try:
-            save_last_combo(mnemonic)
-            save_checkpoint("10+2", WORDLIST[i], j, k, {
-                "TOTAL_TESTS": TOTAL_TESTS,
-                "VALID_BIP39_COUNT": VALID_BIP39_COUNT,
-                "FOUND_WITH_BALANCE": FOUND_WITH_BALANCE
-            })
-        except Exception:
-            pass
-        fut = executor.submit(_task_wrapper, mnemonic)
-        with futures_set_lock:
-            futures_set.add(fut)
-        # print a light heartbeat for visibility (once every 100 submissions)
-        if TOTAL_TESTS % 100 == 0:
-            print(f"[Producer 10+2] submitted tasks so far TOTAL_TESTS={TOTAL_TESTS} | queue={len(futures_set)}")
-        time.sleep(0.002)
-    print("Producer 10+2 finished.")
+    # Escolha do modo de operação (11+1 ou 10+2)
+    print("\n📋 Modos disponíveis:")
+    print("  • 11+1: 11 palavras repetidas + 1 palavra variável")
+    print("  • 10+2: 10 palavras repetidas + 2 palavras variáveis")
+    MODO = input("\n👉 Escolha o modo de operação ('11+1' ou '10+2'): ").strip()
+    if MODO not in ["11+1", "10+2"]:
+        print("❌ Modo inválido. Encerrando.")
+        return
 
-def producer_11_plus_1(start_base_idx, start_j, executor, stop_event):
-    global current_pattern
-    current_pattern = "11+1"
-    print("Producer 11+1 starting...")
-    for i, j, mnemonic in iter_11_plus_1_from(start_base_idx, start_j):
-        if stop_event.is_set():
-            print("Producer 11+1 stop_event set, exiting")
-            break
-        inflight_semaphore.acquire()
-        try:
-            save_last_combo(mnemonic)
-            save_checkpoint("11+1", WORDLIST[i], j, 0, {
-                "TOTAL_TESTS": TOTAL_TESTS,
-                "VALID_BIP39_COUNT": VALID_BIP39_COUNT,
-                "FOUND_WITH_BALANCE": FOUND_WITH_BALANCE
-            })
-        except Exception:
-            pass
-        fut = executor.submit(_task_wrapper, mnemonic)
-        with futures_set_lock:
-            futures_set.add(fut)
-        if TOTAL_TESTS % 100 == 0:
-            print(f"[Producer 11+1] submitted tasks so far TOTAL_TESTS={TOTAL_TESTS} | queue={len(futures_set)}")
-        time.sleep(0.002)
-    print("Producer 11+1 finished.")
+    # Carregar checkpoint
+    contador_total, contador_validas, carteiras_com_saldo, cp_base, cp_var1, cp_var2 = carregar_checkpoint("checkpoint.json")
+    
+    print(f"\n{'=' * 80}")
+    print("📊 ESTATÍSTICAS CARREGADAS")
+    print(f"{'=' * 80}")
+    print(f"  Modo de Operação: {MODO}")
+    print(f"  Total de combinações testadas: {contador_total:,}")
+    print(f"  Combinações válidas (BIP39): {contador_validas:,}")
+    print(f"  Carteiras com saldo: {carteiras_com_saldo}")
+    
+    # Determinar ponto de partida
+    start_i = palavras.index(cp_base) if cp_base in palavras else 0
+    start_j = palavras.index(cp_var1) if cp_var1 in palavras else 0
+    start_k = palavras.index(cp_var2) if cp_var2 in palavras else 0
+    
+    if cp_base:
+        print(f"\n🔄 Continuando da última posição:")
+        print(f"  Base: '{cp_base}' | Var1: '{cp_var1}' | Var2: '{cp_var2}' (se aplicável)")
+    else:
+        print("\n🆕 Nenhum checkpoint encontrado, começando do início...")
+    
+    print(f"\n⚙️  Configurações:")
+    print(f"  Limite de concorrência: {CONCURRENCY_LIMIT} requisições simultâneas")
+    print(f"  Backoff inicial: {INITIAL_BACKOFF_DELAY}s")
+    print(f"  Máximo de tentativas: {MAX_RETRIES}")
+    print(f"\n💡 Pressione Ctrl+C para parar com segurança.\n")
+    print("=" * 80)
+    
+    # Variável para rastrear tempo e taxa
+    tempo_inicio = time.time()
+    ultimo_checkpoint_tempo = tempo_inicio
 
-# -------------------------
-# Main
-# -------------------------
+    # --- Loop Principal e Processamento Assíncrono ---
+    
+    # Lista para armazenar as tarefas assíncronas (verificação de saldo)
+    tasks = []
+    # Usar httpx.AsyncClient para gerenciar conexões eficientemente
+    async with httpx.AsyncClient() as client:
+        try:
+            # Loop principal para gerar combinações
+            for i in range(start_i, len(palavras)):
+                palavra_base = palavras[i]
+                
+                # Otimização para 11+1: apenas uma variável
+                if MODO == "11+1":
+                    start_j_inner = start_j if i == start_i else 0
+                    for j in range(start_j_inner, len(palavras)):
+                        palavra_var1 = palavras[j]
+                        
+                        contador_total += 1
+                        mnemonic = criar_mnemonic(palavra_base, palavra_var1, None, MODO)
+                        
+                        if validar_mnemonic(mnemonic):
+                            contador_validas += 1
+                            # Adiciona a tarefa de processamento à lista
+                            task = asyncio.create_task(
+                                processar_combinacao(client, mnemonic, palavra_base, palavra_var1, None, MODO)
+                            )
+                            tasks.append(task)
+                        
+                        # Exibir progresso e salvar checkpoint
+                        if contador_total % 100 == 0:
+                            tempo_decorrido = time.time() - tempo_inicio
+                            taxa = contador_total / tempo_decorrido if tempo_decorrido > 0 else 0
+                            print(f"📈 Testadas: {contador_total:,} | Válidas: {contador_validas:,} | Com saldo: {carteiras_com_saldo} | Taxa: {taxa:.1f} comb/s")
+                            salvar_checkpoint("checkpoint.json", contador_total, contador_validas, carteiras_com_saldo, palavra_base, palavra_var1, None)
+                        
+                        # Processar resultados das tarefas que já terminaram
+                        tasks = await processar_tarefas_concluidas(tasks, carteiras_com_saldo)
+
+                    # Salvar checkpoint após cada palavra base
+                    salvar_checkpoint("checkpoint.json", contador_total, contador_validas, carteiras_com_saldo, palavra_base, palavras[-1], None)
+                    print(f"\n✓ Concluído para '{palavra_base}' (Modo 11+1).")
+                    start_j = 0 # Resetar para a próxima palavra base
+                
+                # Lógica para 10+2: duas variáveis
+                elif MODO == "10+2":
+                    start_j_outer = start_j if i == start_i else 0
+                    for j in range(start_j_outer, len(palavras)):
+                        palavra_var1 = palavras[j]
+                        
+                        start_k_inner = start_k if i == start_i and j == start_j_outer else 0
+                        for k in range(start_k_inner, len(palavras)):
+                            palavra_var2 = palavras[k]
+                            
+                            contador_total += 1
+                            mnemonic = criar_mnemonic(palavra_base, palavra_var1, palavra_var2, MODO)
+                            
+                            if validar_mnemonic(mnemonic):
+                                contador_validas += 1
+                                # Adiciona a tarefa de processamento à lista
+                                task = asyncio.create_task(
+                                    processar_combinacao(client, mnemonic, palavra_base, palavra_var1, palavra_var2, MODO)
+                                )
+                                tasks.append(task)
+                            
+                            # Exibir progresso e salvar checkpoint
+                            if contador_total % 100 == 0:
+                                tempo_decorrido = time.time() - tempo_inicio
+                                taxa = contador_total / tempo_decorrido if tempo_decorrido > 0 else 0
+                                print(f"📈 Testadas: {contador_total:,} | Válidas: {contador_validas:,} | Com saldo: {carteiras_com_saldo} | Taxa: {taxa:.1f} comb/s")
+                                salvar_checkpoint("checkpoint.json", contador_total, contador_validas, carteiras_com_saldo, palavra_base, palavra_var1, palavra_var2)
+                            
+                            # Processar resultados das tarefas que já terminaram
+                            tasks = await processar_tarefas_concluidas(tasks, carteiras_com_saldo)
+                        
+                        start_k = 0 # Resetar para a próxima palavra var1
+                    
+                    # Salvar checkpoint após cada palavra base
+                    salvar_checkpoint("checkpoint.json", contador_total, contador_validas, carteiras_com_saldo, palavra_base, palavras[-1], palavras[-1])
+                    print(f"\n✓ Concluído para '{palavra_base}' (Modo 10+2).")
+                    start_j = 0 # Resetar para a próxima palavra base
+
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Programa interrompido pelo usuário.")
+        
+        finally:
+            # Esperar que todas as tarefas pendentes terminem
+            print(f"\n⏳ Finalizando {len(tasks)} tarefas pendentes...")
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Garantir que os resultados finais sejam processados
+            tasks = await processar_tarefas_concluidas(tasks, carteiras_com_saldo, final=True)
+            
+            # Salvar estatísticas finais
+            salvar_checkpoint("checkpoint.json", contador_total, contador_validas, carteiras_com_saldo, palavra_base, palavra_var1, palavra_var2 if MODO == "10+2" else None)
+            
+            tempo_total = time.time() - tempo_inicio
+            print(f"\n{'=' * 80}")
+            print("📊 ESTATÍSTICAS FINAIS")
+            print(f"{'=' * 80}")
+            print(f"  Total de combinações testadas: {contador_total:,}")
+            print(f"  Combinações válidas (BIP39): {contador_validas:,}")
+            print(f"  Carteiras com saldo encontradas: {carteiras_com_saldo}")
+            print(f"  Tempo total de execução: {tempo_total/60:.2f} minutos")
+            print(f"  Taxa média: {contador_total/tempo_total:.1f} combinações/segundo")
+            print("=" * 80)
+
+async def processar_tarefas_concluidas(tasks: List[asyncio.Task], carteiras_com_saldo: int, final: bool = False) -> List[asyncio.Task]:
+    """Processa tarefas que já terminaram e retorna a lista de tarefas pendentes."""
+    
+    # Se não for o final, processa apenas as tarefas que já terminaram
+    if not final:
+        done_tasks = [task for task in tasks if task.done()]
+        pending_tasks = [task for task in tasks if not task.done()]
+    else:
+        # No final, processa todas as tarefas
+        done_tasks = tasks
+        pending_tasks = []
+    
+    # Processar resultados das tarefas concluídas
+    for task in done_tasks:
+        try:
+            info, tem_saldo = await task
+            if tem_saldo:
+                carteiras_com_saldo += 1
+                salvar_carteira_com_saldo(info)
+                print(f"\n💎 CARTEIRA COM SALDO ENCONTRADA!")
+                print(f"   Endereço: {info['address']}")
+                print(f"   Mnemonic: {info['mnemonic']}\n")
+        except Exception as e:
+            # Ignorar erros de tarefas individuais
+            pass
+    
+    return pending_tasks
+
+# --- PONTO DE ENTRADA ---
+
 def main():
-    global current_pattern, MODE
-    print("Inicializando realfindbitcoin.py (final)")
-    ck_pattern, ck_base_word, ck_var1_idx, ck_var2_idx, counts = load_checkpoint()
-    print("Checkpoint carregado:", ck_pattern, ck_base_word, ck_var1_idx, ck_var2_idx)
-
-    if ck_base_word:
-        try:
-            base_idx = WORDLIST.index(ck_base_word)
-        except ValueError:
-            base_idx = 0
-    else:
-        base_idx = 0
-
-    global TOTAL_TESTS, VALID_BIP39_COUNT, FOUND_WITH_BALANCE
-    if counts:
-        TOTAL_TESTS = counts.get("TOTAL_TESTS", TOTAL_TESTS)
-        VALID_BIP39_COUNT = counts.get("VALID_BIP39_COUNT", VALID_BIP39_COUNT)
-        FOUND_WITH_BALANCE = counts.get("FOUND_WITH_BALANCE", FOUND_WITH_BALANCE)
-
-    if ck_pattern in ("10+2", "11+1"):
-        patterns = [ck_pattern]
-        if MODE == "hybrid":
-            patterns.append("11+1" if ck_pattern == "10+2" else "10+2")
-    else:
-        patterns = ["10+2", "11+1"] if MODE == "hybrid" else ([MODE] if MODE in ("10+2", "11+1") else ["10+2","11+1"])
-
-    print("Padrões a executar:", patterns, "| base_idx:", base_idx)
-    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-    stop_event = threading.Event()
-    producer_threads = []
-
+    """Ponto de entrada do programa"""
     try:
-        for pat in patterns:
-            if pat == "10+2":
-                start_j = ck_var1_idx if ck_pattern == "10+2" else 0
-                start_k = ck_var2_idx if ck_pattern == "10+2" else 0
-                t = threading.Thread(target=producer_10_plus_2, args=(base_idx, start_j, start_k, executor, stop_event), daemon=False)
-                producer_threads.append(t)
-            else:
-                start_j = ck_var1_idx if ck_pattern == "11+1" else 0
-                t = threading.Thread(target=producer_11_plus_1, args=(base_idx, start_j, executor, stop_event), daemon=False)
-                producer_threads.append(t)
-
-        for t in producer_threads:
-            t.start()
-
-        # IMMEDIATE VISIBILITY: wait a short moment and print queue size to confirm activity
-        time.sleep(0.5)
-        with futures_set_lock:
-            qsize = len(futures_set)
-        if qsize == 0:
-            print("[AVISO] Nenhuma task ainda submetida nos primeiros 0.5s. Producers podem demorar a gerar primeiro lote.")
-            # show a short activity probe for up to 6 seconds
-            probe_deadline = time.time() + 6.0
-            while time.time() < probe_deadline and qsize == 0 and any(t.is_alive() for t in producer_threads):
-                time.sleep(0.7)
-                with futures_set_lock:
-                    qsize = len(futures_set)
-                print(f"[PROBE] queue={qsize} | producers_alive={[t.is_alive() for t in producer_threads]}")
-            if qsize == 0:
-                print("[AVISO] Ainda sem tasks após probe. Se persistir, reduza MAX_WORKERS ou verifique bloqueios de I/O.")
-        else:
-            print(f"[OK] Tasks já submetidas: queue={qsize}")
-
-        last_status = time.time()
-        while any(t.is_alive() for t in producer_threads) or futures_set:
-            done_list = []
-            with futures_set_lock:
-                for f in list(futures_set):
-                    if f.done():
-                        done_list.append(f)
-                        futures_set.remove(f)
-            for f in done_list:
-                try:
-                    _res = f.result()
-                except Exception as e:
-                    print(f"❌ Erro em task: {e}")
-
-            for lim in API_LIMITERS:
-                lim.adjust_rate()
-
-            now = time.time()
-            if now - last_status >= STATUS_INTERVAL:
-                with lock_counters:
-                    rates = ", ".join([f"{API_DEFINITIONS[idx][0].split('//')[1].split('/')[0]}:{round(API_LIMITERS[idx].rate,3)}t/s" for idx in range(len(API_DEFINITIONS))])
-                    inflight_used = MAX_INFLIGHT_TASKS - (inflight_semaphore._value if hasattr(inflight_semaphore,'_value') else 0)
-                    print(f"[STATUS] TOTAL_TESTS={TOTAL_TESTS} | VALID_BIP39={VALID_BIP39_COUNT} | FOUND_WITH_BALANCE={FOUND_WITH_BALANCE} | inflight={inflight_used} | queue={len(futures_set)}")
-                    print(f"   API rates: {rates} | Global 429s recent: {get_global_429_count()}")
-                try:
-                    patt = current_pattern if 'current_pattern' in globals() and current_pattern else patterns[0]
-                    save_checkpoint(patt, WORDLIST[base_idx], 0, 0, {
-                        "TOTAL_TESTS": TOTAL_TESTS,
-                        "VALID_BIP39_COUNT": VALID_BIP39_COUNT,
-                        "FOUND_WITH_BALANCE": FOUND_WITH_BALANCE
-                    })
-                except Exception:
-                    pass
-                last_status = now
-
-            time.sleep(0.2)
-
+        asyncio.run(main_async())
     except KeyboardInterrupt:
-        print("\n🛑 Interrompido pelo usuário — salvando checkpoint e saindo...")
-        stop_event.set()
+        print("\n\n👋 Programa encerrado pelo usuário.")
     except Exception as e:
-        print("❌ Erro FATAL no main loop:", e)
-        print(traceback.format_exc())
-        stop_event.set()
-    finally:
-        stop_event.set()
-        for t in producer_threads:
-            t.join(timeout=2.0)
-        wait_start = time.time()
-        while futures_set and time.time() - wait_start < 10.0:
-            done_list = []
-            with futures_set_lock:
-                for f in list(futures_set):
-                    if f.done():
-                        done_list.append(f)
-                        futures_set.remove(f)
-            for f in done_list:
-                try:
-                    _ = f.result()
-                except Exception:
-                    pass
-            time.sleep(0.1)
-        executor.shutdown(wait=True)
-        try:
-            patt = current_pattern if 'current_pattern' in globals() and current_pattern else patterns[0]
-            save_checkpoint(patt, WORDLIST[base_idx], 0, 0, {
-                "TOTAL_TESTS": TOTAL_TESTS,
-                "VALID_BIP39_COUNT": VALID_BIP39_COUNT,
-                "FOUND_WITH_BALANCE": FOUND_WITH_BALANCE
-            })
-        except Exception:
-            pass
+        print(f"\n❌ Erro fatal: {e}")
 
-        print("\n--- EXECUÇÃO FINALIZADA ---")
-        print(f"TOTAL_TESTS = {TOTAL_TESTS}")
-        print(f"VALID_BIP39_COUNT = {VALID_BIP39_COUNT}")
-        print(f"FOUND_WITH_BALANCE = {FOUND_WITH_BALANCE}")
-
-# -------------------------
-# Entrypoint
-# -------------------------
 if __name__ == "__main__":
-    if not os.path.exists(CHECKPOINT_FILE):
-        save_checkpoint("10+2" if MODE == "hybrid" else MODE, WORDLIST[0], 0, 0, {
-            "TOTAL_TESTS": 0, "VALID_BIP39_COUNT": 0, "FOUND_WITH_BALANCE": 0
-        })
-    current_pattern = None
     main()
