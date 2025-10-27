@@ -1,4 +1,4 @@
-Última palavra base testada: 395 (course)
-Total de combinações testadas: 2422300
-Combinações válidas: 78764
-Carteiras com saldo: 4
+Última palavra base testada: 1 (abandon)
+Total de combinações testadas: 2491600
+Combinações válidas: 83096
+Carteiras com saldo: 6
