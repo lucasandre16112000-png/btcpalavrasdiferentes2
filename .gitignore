@@ -1,6 +1,24 @@
+============================================
+Regras Essenciais de Exclusão para Python/WSL/Git
+============================================
+1. AMBIENTES VIRTUAIS (CRÍTICO)
+Ignora pastas de ambientes virtuais (venv, o seu ambiente específico, etc.)
 venv/
-*.swp
-*.bak
-_pycache_/
+meu_ambiente_btc/
+.venv/
+2. ARQUIVOS DE ESTADO E PROGRESSO (SEMPRE IGNORAR)
+O progresso do seu script não deve ir para o GitHub.
+checkpoint.txt
+ultimo.txt
+saldo.txt
+estatisticas_finais.txt
+3. PYTHON CACHE E COMPILADOS
+Arquivos de cache e bytecode gerados pelo Python
+pycache/
 *.pyc
 *.log
+4. ARQUIVOS DE EDIÇÃO
+Arquivos temporários de editores
+*.swp
+*.bak_pycache_/
+*.bak

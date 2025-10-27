@@ -1,4 +1,4 @@
-Última palavra base testada: 42 (ahead)
-Total de combinações testadas: 85708
-Combinações válidas: 5322
+Última palavra base testada: 781 (ghost)
+Total de combinações testadas: 1597629
+Combinações válidas: 28213
 Carteiras com saldo: 0
