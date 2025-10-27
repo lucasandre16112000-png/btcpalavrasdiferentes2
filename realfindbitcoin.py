@@ -1,55 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-realfindbitcoin.py (CPU-ONLY otimizado)
-Mantém 100% da lógica: padrão 10 repetidas + 2 variáveis, valida BIP39,
-deriva BIP44, verifica saldo na mempool.space e salva carteiras com saldo.
-Otimizações: ProcessPoolExecutor (multiprocess), reuso de validator,
-requests.Session pooling, redução de I/O (salva ultimo.txt com frequência configurável),
-salvamentos atômicos e safe shutdown (Ctrl+C).
+findbtc_otimizado_10_2.py
+Gera carteiras Bitcoin (10 repetidas + 2 variáveis).
+=====================================================
+OTIMIZAÇÃO: Usa ThreadPoolExecutor para rodar as consultas de saldo
+de forma CONCORRENTE, aplicando o delay de time.sleep(0.1) necessário
+para evitar o bloqueio da API, mas sem atrasar a geração de chaves
+pelo loop principal (velocidade máxima do processador).
 """
 
 import os
 import time
+import random
+import requests
 import signal
 from time import perf_counter
-from concurrent.futures import ProcessPoolExecutor
-from typing import Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed # Alterado para ThreadPoolExecutor
+from typing import Optional, Tuple, Dict, Any
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-# bip-utils imports (usados no main e no worker)
+# bip-utils imports
 from bip_utils import Bip39SeedGenerator, Bip39MnemonicValidator, Bip44, Bip44Coins, Bip44Changes
 
-# -------- CONFIGURAÇÃO (ajuste conforme preferir) ----------
+# -------- CONFIGURAÇÃO DE VELOCIDADE/CONCORRÊNCIA ----------
+# CRÍTICO: 10 workers é o ideal para o time.sleep(0.1) / 10 requisições por segundo.
+MAX_WORKERS_IO = 10 
+# Tempo de espera entre as requisições para evitar o bloqueio da API (Obrigatório)
+API_DELAY_SEC = 0.1 
+
+# -------- Arquivos de Checkpoint / Log ---------------------
 BIP39_WORDS_FILE = "bip39-words.txt"
 CHECKPOINT_FILE = "checkpoint.txt"
 ULTIMO_FILE = "ultimo.txt"
 SALDO_FILE = "saldo.txt"
 ESTATISTICAS_FILE = "estatisticas_finais.txt"
 
-FREQUENCY_PRINT = 100        # print a cada N combinações
-FREQUENCY_SAVE = 100         # salvar checkpoint a cada N combinações
-SAVE_INTERVAL_SEC = 15       # ou salvar checkpoint a cada X segundos
-SAVE_ULTIMO_EVERY = 100      # salva ultimo.txt a cada N combinações (evita I/O a cada iteração)
-SAVE_ULTIMO_INTERVAL = 5.0   # ou salva ultimo após este tempo (s)
+# Frequências de salvamento (ajustadas)
+FREQUENCY_PRINT = 1000        
+FREQUENCY_SAVE_CHECKPOINT = 1000 
+SAVE_INTERVAL_SEC = 30       
+SAVE_ULTIMO_INTERVAL = 10.0  # Salva a última combinação a cada 10s
+REQUESTS_TIMEOUT = 15
 
-USE_PROCESS_POOL = True
-CPU_WORKERS = max(1, (os.cpu_count() or 2) - 1)  # default: núcleos - 1
-# MELHORIA APLICADA: Permite forçar o número de workers via variável de ambiente (RF_CPU_WORKERS)
-CPU_WORKERS = int(os.getenv('RF_CPU_WORKERS', str(CPU_WORKERS))) 
-REQUESTS_TIMEOUT = 8
-
-# -------- HTTP session global (pooling) ---------------------
-SESSION = requests.Session()
-retries = Retry(total=3, backoff_factor=0.25, status_forcelist=(500,502,503,504))
-adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retries)
-SESSION.mount("https://", adapter)
-SESSION.mount("http://", adapter)
-
-# -------- I/O helpers atômicos ------------------------------
+# -------- I/O helpers atômicos (Preservados do seu script) ----------------
 def atomic_write(path: str, content: str, encoding='utf-8'):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding=encoding) as f:
@@ -70,7 +63,7 @@ def append_and_sync(path: str, text: str, encoding='utf-8'):
         except Exception:
             pass
 
-# -------- Carregamento / checkpoint -------------------------
+# -------- Carregamento / checkpoint (Preservados do seu script) ---------
 def carregar_palavras_bip39(arquivo=BIP39_WORDS_FILE):
     if not os.path.exists(arquivo):
         raise FileNotFoundError(f"Arquivo {arquivo} não encontrado!")
@@ -88,6 +81,7 @@ def carregar_ultima_combinacao(arquivo=ULTIMO_FILE) -> Tuple[Optional[str], Opti
             palavras = f.read().strip().split()
             if len(palavras) == 12:
                 palavra_base = palavras[0]
+                # Verifica se as 10 primeiras são repetidas
                 if all(p == palavra_base for p in palavras[:10]):
                     return palavra_base, palavras[10], palavras[11], " ".join(palavras)
     except Exception:
@@ -97,8 +91,7 @@ def carregar_ultima_combinacao(arquivo=ULTIMO_FILE) -> Tuple[Optional[str], Opti
 def carregar_estatisticas_checkpoint(arquivo=CHECKPOINT_FILE):
     contador_total = contador_validas = carteiras_com_saldo = 0
     if not os.path.exists(arquivo):
-        salvar_checkpoint(arquivo, 0, "", 0, 0, 0)
-        return 0,0,0
+        return 0, 0, 0
     try:
         with open(arquivo, "r", encoding="utf-8") as f:
             for line in f:
@@ -115,14 +108,17 @@ def carregar_estatisticas_checkpoint(arquivo=CHECKPOINT_FILE):
         print(f"Erro ao ler checkpoint: {e}")
     return contador_total, contador_validas, carteiras_com_saldo
 
-def encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa1):
+def encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa1, ultima_completa2):
+    """Lógica do seu script 10+2: Base(i), Var1(j), Var2(j+1)"""
     try:
         base_idx = palavras.index(ultima_base)
-        first_idx = palavras.index(ultima_completa1)
-        if first_idx + 1 < len(palavras) - 1:
-            return base_idx, first_idx + 1
+        completa1_idx = palavras.index(ultima_completa1)
+        
+        # O loop principal é (base_idx, completa1_idx + 1)
+        if completa1_idx + 1 < len(palavras) - 1: # -1 porque a Var2 é j+1
+            return base_idx, completa1_idx + 1
         elif base_idx + 1 < len(palavras):
-            return base_idx + 1, 0
+            return base_idx + 1, 0 # Começa Var1 do zero
         else:
             return None, None
     except ValueError:
@@ -156,60 +152,128 @@ def salvar_carteira_com_saldo(palavra_base, palavra_completa1, palavra_completa2
     append_and_sync(SALDO_FILE, texto)
     print("🎉 CARTEIRA COM SALDO SALVA! 🎉")
 
-# -------- Worker pesado (executa em processo separado) ------
-def worker_process_validation(args):
-    mnemonic, palavra_base, palavra_completa1, palavra_completa2 = args
-    try:
-        from bip_utils import Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
-        import requests
 
-        seed_gen = Bip39SeedGenerator(mnemonic)
-        seed_bytes = seed_gen.Generate()
+def derivar_chaves(mnemonic: str) -> Dict[str, Any]:
+    """Gera seed e deriva chaves BTC BIP44. Executado na thread principal."""
+    seed_gen = Bip39SeedGenerator(mnemonic)
+    seed_bytes = seed_gen.Generate()
 
-        bip44_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN)
-        acct = bip44_ctx.Purpose().Coin().Account(0)
-        change = acct.Change(Bip44Changes.CHAIN_EXT)
-        addr_index = change.AddressIndex(0)
+    bip44_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.BITCOIN)
+    acct = bip44_ctx.Purpose().Coin().Account(0)
+    change = acct.Change(Bip44Changes.CHAIN_EXT)
+    addr_index = change.AddressIndex(0)
 
-        priv_key_obj = addr_index.PrivateKey()
-        pub_key_obj = addr_index.PublicKey()
-        info = {
-            "priv_hex": priv_key_obj.Raw().ToHex(),
-            "wif": priv_key_obj.ToWif(),
-            "pub_compressed_hex": pub_key_obj.RawCompressed().ToHex(),
-            "address": addr_index.PublicKey().ToAddress()
-        }
+    priv_key_obj = addr_index.PrivateKey()
+    pub_key_obj = addr_index.PublicKey()
+    
+    return {
+        "priv_hex": priv_key_obj.Raw().ToHex(),
+        "wif": priv_key_obj.ToWif(),
+        "pub_compressed_hex": pub_key_obj.RawCompressed().ToHex(),
+        "address": addr_index.PublicKey().ToAddress()
+    }
 
-        session = requests.Session()
+
+# -------- FUNÇÃO WORKER DE I/O CONCORRENTE (AGORA COM THREADS) ------
+def verificar_saldo_api_worker(mnemonic: str, palavra_base: str, palavra_completa1: str, palavra_completa2: str, info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Worker aprimorado contra bloqueios:
+    - Retries com backoff exponencial + jitter para 429 e erros temporários.
+    - Timeout configurável via REQUESTS_TIMEOUT.
+    - Usa Session local à chamada para reaproveitar conexões.
+    - Mantém time.sleep(API_DELAY_SEC) no final para preservar o delay anti-bloqueio.
+    """
+    endereco = info["address"]
+    tem_saldo = False
+
+    max_retries = 5
+    base_backoff = 1.0  # segundos iniciais para backoff exponencial em 429/erros temporários
+    session = requests.Session()
+    headers = {
+        "User-Agent": "findbtc_otimizado/1.0",
+        "Accept": "application/json"
+    }
+
+    for attempt in range(1, max_retries + 1):
         try:
-            resp = session.get(f"https://mempool.space/api/address/{info['address']}", timeout=REQUESTS_TIMEOUT)
-            if resp.status_code == 200:
-                data = resp.json()
-                saldo = data.get('chain_stats', {}).get('funded_txo_sum', 0)
-                tem_saldo = saldo > 0
-            else:
-                tem_saldo = False
-        except Exception:
-            tem_saldo = False
+            url = f"https://mempool.space/api/address/{endereco}"
+            response = session.get(url, headers=headers, timeout=REQUESTS_TIMEOUT)
 
-        return {
-            "mnemonic": mnemonic,
-            "palavra_base": palavra_base,
-            "palavra_completa1": palavra_completa1,
-            "palavra_completa2": palavra_completa2,
-            "tem_saldo": tem_saldo,
-            "info": info if tem_saldo else None
-        }
-    except Exception as e:
-        return {
-            "mnemonic": mnemonic,
-            "palavra_base": palavra_base,
-            "palavra_completa1": palavra_completa1,
-            "palavra_completa2": palavra_completa2,
-            "tem_saldo": False,
-            "info": None,
-            "error": str(e)
-        }
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except ValueError as e:
+                    print(f"❗ JSON inválido para {endereco}: {e}")
+                    data = {}
+
+                chain = data.get("chain_stats", {}) or {}
+                mempool = data.get("mempool_stats", {}) or {}
+
+                funded_chain = int(chain.get("funded_txo_sum", 0))
+                spent_chain = int(chain.get("spent_txo_sum", 0))
+                funded_mempool = int(mempool.get("funded_txo_sum", 0))
+                spent_mempool = int(mempool.get("spent_txo_sum", 0))
+
+                balance = (funded_chain - spent_chain) + (funded_mempool - spent_mempool)
+                tem_saldo = balance > 0
+                break  # sucesso -> sai do loop de retries
+
+            elif response.status_code == 429:
+                # Rate limit: backoff exponencial com jitter
+                backoff = base_backoff * (2 ** (attempt - 1))
+                jitter = random.uniform(0, backoff * 0.3)
+                sleep_time = backoff + jitter
+                print(f"🔴 429 para {endereco} (attempt {attempt}/{max_retries}). Backoff {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+                continue
+
+            elif 500 <= response.status_code < 600:
+                # Erro de servidor temporário -> backoff e retry
+                backoff = base_backoff * (2 ** (attempt - 1))
+                jitter = random.uniform(0, backoff * 0.2)
+                sleep_time = backoff + jitter
+                print(f"⚠️ {response.status_code} servidor para {endereco} (attempt {attempt}/{max_retries}). Retentando em {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+                continue
+
+            else:
+                # Outros códigos HTTP (4xx que não são 429 etc.) -> não faz retry extensivo
+                print(f"⚠️ Código HTTP {response.status_code} para {endereco} (sem retry).")
+                break
+
+        except requests.exceptions.RequestException as e:
+            # Erros de rede: retry com backoff
+            backoff = base_backoff * (2 ** (attempt - 1))
+            jitter = random.uniform(0, backoff * 0.25)
+            sleep_time = backoff + jitter
+            print(f"⛔ Erro de requisição para {endereco}: {e} (attempt {attempt}/{max_retries}). Retentando em {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+            continue
+        except Exception as e:
+            # Erro inesperado: log e não tenta infinitamente
+            print(f"⛔ Erro inesperado ao verificar {endereco}: {e}")
+            break
+
+    # Assegura o delay anti-bloqueio por thread (mantém comportamento original)
+    try:
+        time.sleep(API_DELAY_SEC)
+    except Exception:
+        pass
+
+    # Fecha a session para liberar recursos (não obrigatório, mas limpo)
+    try:
+        session.close()
+    except Exception:
+        pass
+
+    return {
+        "tem_saldo": tem_saldo,
+        "mnemonic": mnemonic,
+        "palavra_base": palavra_base,
+        "palavra_completa1": palavra_completa1,
+        "palavra_completa2": palavra_completa2,
+        "info": info
+    }
 
 # -------- Signal handling para shutdown seguro -------------
 _shutdown_requested = False
@@ -221,7 +285,7 @@ def _signal_handler(sig, frame):
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
-# -------- Função principal ----------------------------------
+# -------- Função principal (Loop) ----------------------------------
 def main():
     global _shutdown_requested
 
@@ -242,7 +306,7 @@ def main():
 
     if ultima_base and ultima_completa1 and ultima_completa2:
         print(f"Última combinação testada: {ultimo_mnemonic}")
-        base_idx, completa_idx = encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa1)
+        base_idx, completa_idx = encontrar_proxima_combinacao(palavras, ultima_base, ultima_completa1, ultima_completa2)
         if base_idx is None:
             print("Todas as combinações já foram testadas!")
             return
@@ -250,19 +314,21 @@ def main():
         print("Nenhum checkpoint encontrado, começando do início...\n")
         base_idx, completa_idx = 0, 0
 
+    print(f"Padrão: 10 palavras repetidas + 2 variáveis (j, j+1)")
     print(f"Continuando de '{palavras[base_idx]}' (base), iniciando variação #{completa_idx+1}")
-    print("\nIniciando geração de combinações 10+2 BIP39...\n")
+    print(f"Utilizando {MAX_WORKERS_IO} threads para consultas online (I/O) de forma segura.")
+    print("\nIniciando geração de combinações BIP39...\n")
 
     validator = Bip39MnemonicValidator()
     t0 = perf_counter()
     ultimo_salvamento_tempo = time.time()
     last_save_ultimo_time = time.time()
-    combos_since_last = 0
 
     stats_validas = contador_validas
     stats_saldos = carteiras_com_saldo
 
-    executor = ProcessPoolExecutor(max_workers=CPU_WORKERS) if USE_PROCESS_POOL else None
+    # Inicializa o pool de threads para I/O (agora é ThreadPoolExecutor)
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS_IO)
     pending_futures = []
 
     try:
@@ -273,7 +339,8 @@ def main():
             base_prefix = " ".join([palavra_base] * 10)
             start_j = completa_idx if i == base_idx else 0
 
-            for j in range(start_j, len(palavras) - 1):
+            # O loop vai até len(palavras) - 1 porque a segunda palavra é j + 1
+            for j in range(start_j, len(palavras) - 1): 
                 if _shutdown_requested:
                     break
 
@@ -283,22 +350,23 @@ def main():
 
                 mnemonic = f"{base_prefix} {palavra_completa1} {palavra_completa2}"
 
-                combos_since_last += 1
                 now = time.time()
-                if combos_since_last >= SAVE_ULTIMO_EVERY or (now - last_save_ultimo_time) >= SAVE_ULTIMO_INTERVAL:
+                # Salva o último ponto de forma frequente e segura
+                if (now - last_save_ultimo_time) >= SAVE_ULTIMO_INTERVAL:
                     salvar_ultima_combinacao(ULTIMO_FILE, palavra_base, palavra_completa1, palavra_completa2)
-                    combos_since_last = 0
                     last_save_ultimo_time = now
 
-                if now - ultimo_salvamento_tempo > SAVE_INTERVAL_SEC or contador_total % FREQUENCY_SAVE == 0:
+                # Salva checkpoint de estatísticas
+                if now - ultimo_salvamento_tempo > SAVE_INTERVAL_SEC or contador_total % FREQUENCY_SAVE_CHECKPOINT == 0:
                     salvar_checkpoint(CHECKPOINT_FILE, i, palavra_base, contador_total, stats_validas, stats_saldos)
                     ultimo_salvamento_tempo = now
 
+                # Exibir progresso
                 if contador_total % FREQUENCY_PRINT == 0:
                     elapsed = perf_counter() - t0
                     rate = contador_total / elapsed if elapsed > 0 else 0.0
                     print(f"Testadas {contador_total} combinações | Última: {mnemonic}")
-                    print(f"  Válidas (até agora): {stats_validas} | Com saldo: {stats_saldos} | {rate:.2f} combos/s")
+                    print(f"  Válidas (processadas): {stats_validas} | Com saldo: {stats_saldos} | Taxa: {rate:.2f} combos/s")
 
                 try:
                     is_valid = validator.IsValid(mnemonic)
@@ -306,60 +374,71 @@ def main():
                     is_valid = False
 
                 if is_valid:
-                    if executor:
-                        fut = executor.submit(worker_process_validation, (mnemonic, palavra_base, palavra_completa1, palavra_completa2))
-                        pending_futures.append(fut)
-                    else:
-                        res = worker_process_validation((mnemonic, palavra_base, palavra_completa1, palavra_completa2))
-                        if res.get("tem_saldo"):
-                            stats_saldos += 1
-                            salvar_carteira_com_saldo(res["palavra_base"], res["palavra_completa1"], res["palavra_completa2"], res["mnemonic"], res["info"])
-                        stats_validas += 1
+                    # 1. Derivação de chaves (CPU) -> Rápido, na thread principal
+                    info = derivar_chaves(mnemonic)
+                    
+                    # 2. Submissão da consulta de saldo (I/O + Delay) -> Para o pool de threads
+                    fut = executor.submit(
+                        verificar_saldo_api_worker, 
+                        mnemonic, palavra_base, palavra_completa1, palavra_completa2, info
+                    )
+                    pending_futures.append(fut)
 
-                if pending_futures and (len(pending_futures) >= 50 or contador_total % (FREQUENCY_PRINT*2) == 0):
-                    done_now = []
-                    for f in list(pending_futures):
-                        if f.done():
-                            try:
-                                r = f.result(timeout=0)
-                            except Exception:
-                                r = {"tem_saldo": False}
+                # Processa os resultados prontos do pool de threads
+                futures_to_remove = []
+                for future in pending_futures:
+                    if future.done():
+                        try:
+                            r = future.result()
+                            stats_validas += 1 # Contagem de válidas aumenta ao receber o resultado
+                            
                             if r.get("tem_saldo"):
                                 stats_saldos += 1
                                 salvar_carteira_com_saldo(r["palavra_base"], r["palavra_completa1"], r["palavra_completa2"], r["mnemonic"], r["info"])
-                            if r.get("mnemonic"):
-                                stats_validas += 1
-                            done_now.append(f)
-                    for f in done_now:
-                        try:
-                            pending_futures.remove(f)
-                        except ValueError:
-                            pass
+                                
+                        except Exception as e:
+                            print(f"Erro ao processar resultado de thread: {e}")
+                        
+                        futures_to_remove.append(future)
+                
+                # Remove os futuros processados
+                for future in futures_to_remove:
+                    try:
+                        pending_futures.remove(future)
+                    except ValueError:
+                        pass # Já foi removido
 
+            # Resetar índice da palavra completa após processar a primeira palavra base
             completa_idx = 0
+            
+            # Salvar checkpoint ao fim de cada palavra base
             salvar_checkpoint(CHECKPOINT_FILE, i, palavra_base, contador_total, stats_validas, stats_saldos)
-            print(f"\nConcluído para '{palavra_base}': {stats_validas} válidas, {stats_saldos} com saldo\n")
+            print(f"\nConcluído para '{palavra_base}': {stats_validas} válidas processadas, {stats_saldos} com saldo\n")
 
     except Exception as e:
         print(f"[main] Erro inesperado: {e}")
 
     finally:
-        if executor:
-            print("🟢 Aguardando finalização das tasks pendentes do pool...")
-            for f in pending_futures:
-                try:
-                    r = f.result(timeout=30)
-                    if r.get("tem_saldo"):
-                        stats_saldos += 1
-                        salvar_carteira_com_saldo(r["palavra_base"], r["palavra_completa1"], r["palavra_completa2"], r["mnemonic"], r["info"])
-                    if r.get("mnemonic"):
-                        stats_validas += 1
-                except Exception:
-                    pass
-            executor.shutdown(wait=True)
+        print("🟢 Aguardando finalização das tasks pendentes do pool...")
+        # Processa todos os resultados finais antes de desligar o pool
+        for f in as_completed(pending_futures):
+            try:
+                r = f.result()
+                stats_validas += 1
+                if r.get("tem_saldo"):
+                    stats_saldos += 1
+                    salvar_carteira_com_saldo(r["palavra_base"], r["palavra_completa1"], r["palavra_completa2"], r["mnemonic"], r["info"])
+            except Exception:
+                pass
+        
+        executor.shutdown(wait=True)
 
+        # Salva o último ponto de parada
+        salvar_ultima_combinacao(ULTIMO_FILE, palavra_base if 'palavra_base' in locals() else "", palavra_completa1 if 'palavra_completa1' in locals() else "", palavra_completa2 if 'palavra_completa2' in locals() else "")
+        
+        # Salvar estatísticas finais
         salvar_checkpoint(CHECKPOINT_FILE, i if 'i' in locals() else 0, palavra_base if 'palavra_base' in locals() else "", contador_total, stats_validas, stats_saldos)
-
+        
         with open(ESTATISTICAS_FILE, "w", encoding='utf-8') as f:
             f.write("ESTATÍSTICAS FINAIS\n" + "="*50 + "\n")
             f.write(f"Total testadas: {contador_total}\n")
