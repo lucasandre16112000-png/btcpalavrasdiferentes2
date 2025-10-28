@@ -44,6 +44,9 @@ ENDERECO_DESTINO = "bc1qy34f7mqu952svl3eaklwqzw9v6h6paa5led9rs"
 # Saldo mínimo para saque automático (em satoshis)
 SALDO_MINIMO_SAQUE = 50000  # 0.0005 BTC
 
+
+# Modo de teste (não envia transações reais)
+MODO_TESTE = False  # Mude para True para testar sem enviar
 # ============================================================================
 # FILA COMPARTILHADA DE ENDEREÇOS
 # ============================================================================
@@ -421,17 +424,17 @@ async def sacar_automaticamente(wif, saldo_sats):
             # Taxa máxima: 50% do saldo
             taxa_max_sats = int(saldo_sats * 0.5)
             prioridade = "baixa"
-            taxa_sat_vb = 1  # 1 sat/vB
+            taxa_sat_vb = 50  # 50 sat/vB - Confirma em ~10-30 min
         elif saldo_sats < 500000:  # < 0.005 BTC
             # Taxa máxima: 20% do saldo
             taxa_max_sats = int(saldo_sats * 0.2)
             prioridade = "media"
-            taxa_sat_vb = 5  # 5 sat/vB
+            taxa_sat_vb = 100  # 100 sat/vB - Confirma em ~5-10 min
         else:
             # Sem limite de taxa
             taxa_max_sats = None
             prioridade = "maxima"
-            taxa_sat_vb = 10  # 10 sat/vB
+            taxa_sat_vb = 150  # 150 sat/vB - Confirma em ~1-5 min (próximo bloco!)
         
         print(f"Prioridade: {prioridade.upper()}")
         print(f"Taxa inicial: {taxa_sat_vb} sat/vB")
@@ -464,8 +467,22 @@ async def sacar_automaticamente(wif, saldo_sats):
                 print(f"   Valor a enviar: {valor_enviar} sats")
                 print(f"   Taxa: {taxa_total} sats ({(taxa_total/saldo_sats)*100:.1f}%)")
                 
-                # Criar e enviar transação
-                tx_hash = key.send([(ENDERECO_DESTINO, valor_enviar, 'satoshi')], fee=taxa_sat_vb)
+                # MODO DE TESTE: NÃO ENVIA TRANSAÇÃO REAL
+                if MODO_TESTE:
+                    print(f"\n⚠️  MODO DE TESTE ATIVADO - TRANSAÇÃO NÃO FOI ENVIADA!")
+                    print(f"   Endereço origem: {key.address}")
+                    print(f"   Endereço destino: {ENDERECO_DESTINO}")
+                    print(f"   Valor: {valor_enviar} sats ({valor_enviar/100000000:.8f} BTC)")
+                    print(f"   Taxa: {taxa_sat_vb} sat/vB ({taxa_total} sats total)")
+                    print(f"   Tamanho TX: ~{tamanho_tx} bytes")
+                    print(f"   Prioridade: {prioridade.upper()}")
+                    print(f"\n   Para enviar de verdade, mude MODO_TESTE = False no script!\n")
+                    
+                    # Simular TXID
+                    tx_hash = f"TESTE_{int(time.time())}_{valor_enviar}"
+                else:
+                    # Criar e enviar transação REAL
+                    tx_hash = key.send([(ENDERECO_DESTINO, valor_enviar, 'satoshi')], fee=taxa_sat_vb)
                 
                 print(f"\n✅ SAQUE REALIZADO COM SUCESSO!")
                 print(f"   TXID: {tx_hash}")
@@ -927,4 +944,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
