@@ -41,7 +41,8 @@ from bip_utils import (
 # ============================================================================
 
 TIMEOUT = 10
-CONCURRENCY_PER_API = 3  # 3 carteiras por API
+CONCURRENCY_PER_API = 3  # Não usado mais
+CONCURRENCY_TOTAL = 5  # 5 carteiras em paralelo
 CHECKPOINT_FILE = "checkpoint.json"
 SALDO_FILE = "saldo.txt"
 BIP39_FILE = "bip39-words.txt"
@@ -376,7 +377,7 @@ class DistribuidorAPIs:
         self.limiters = {
             "Mempool": APIRateLimiter("Mempool", 3.0),
             "Blockstream": APIRateLimiter("Blockstream", 3.0),
-            "BlockCypher": APIRateLimiter("BlockCypher", 2.0, limite_hora=BLOCKCYPHER_LIMIT_HOUR)  # 2 req/s, para em 98 req/hora
+            "BlockCypher": APIRateLimiter("BlockCypher", 1.0, limite_hora=BLOCKCYPHER_LIMIT_HOUR)  # 1 req/s, para em 98 req/hora
         }
         
         # APIs principais (usadas primeiro)
@@ -652,9 +653,10 @@ async def main():
         print("ℹ️  Nenhum checkpoint encontrado, começando do início")
     
     print(f"\n🚀 Iniciando busca em modo {modo}...")
-    print(f"⚡ Concorrência: 6 carteiras em paralelo")
+    print(f"⚡ Concorrência: 5 carteiras em paralelo")
     print(f"🌐 2 APIs principais + 1 backup")
     print(f"📊 3 derivações por mnemonic (BIP44+BIP49+BIP84)")
+    print(f"🔒 BlockCypher: 1 req/s, para em 98 req/hora")
     print("\nPressione Ctrl+C para parar com segurança\n")
     
     # Criar cliente HTTP e distribuidor
@@ -689,8 +691,8 @@ async def main():
                             )
                             tarefas_pendentes.append(tarefa)
                             
-                            # Limitar tarefas pendentes (6 carteiras em paralelo)
-                            if len(tarefas_pendentes) >= 6:
+        # Limitar tarefas pendentes (5 carteiras em paralelo)
+        if len(tarefas_pendentes) >= 5:
                                 done, tarefas_pendentes = await asyncio.wait(
                                     tarefas_pendentes,
                                     return_when=asyncio.FIRST_COMPLETED
@@ -738,8 +740,8 @@ async def main():
                                 )
                                 tarefas_pendentes.append(tarefa)
                                 
-                                # Limitar tarefas pendentes (6 carteiras em paralelo)
-                                if len(tarefas_pendentes) >= 6:
+                        # Limitar tarefas pendentes (5 carteiras em paralelo)
+                        if len(tarefas_pendentes) >= 5:
                                     done, tarefas_pendentes = await asyncio.wait(
                                         tarefas_pendentes,
                                         return_when=asyncio.FIRST_COMPLETED
