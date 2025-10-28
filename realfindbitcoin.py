@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bitcoin Wallet Finder - Versão Ultimate com Concorrência Adaptativa
-Mantém a lógica original mas otimiza a verificação de saldo com async adaptativo
+Bitcoin Wallet Finder - Versão TURBO
+Múltiplas APIs, Processamento Paralelo, Concorrência Adaptativa
+Mantém 100% da lógica original: Valida → Gera → Verifica
 Suporta modos: 11+1 e 10+2
 """
 
@@ -17,17 +18,37 @@ from bip_utils import (
     Bip39SeedGenerator, Bip39MnemonicValidator,
     Bip44, Bip44Coins, Bip44Changes
 )
-from typing import Optional, Dict, List
+from typing import Optional, Dict, Tuple
 
 # ==================== CONFIGURAÇÕES ====================
-CONCURRENCY_INITIAL = 8  # Começa com 8 requisições simultâneas
-CONCURRENCY_MIN = 3      # Mínimo em caso de muitos erros
-CONCURRENCY_MAX = 15     # Máximo permitido
-MAX_RETRIES = 2          # Tentativas por endereço
-RETRY_DELAY = 1.0        # Delay entre tentativas
-CHECKPOINT_INTERVAL = 30 # Salvar checkpoint a cada X segundos
+CONCURRENCY_INITIAL = 10  # Começa com 10 requisições simultâneas (conservador)
+CONCURRENCY_MIN = 5       # Mínimo em caso de erros
+CONCURRENCY_MAX = 20      # Máximo permitido
+MAX_RETRIES = 2           # Tentativas por endereço
+TIMEOUT = 5               # Timeout reduzido para 5s (mais rápido)
+CHECKPOINT_INTERVAL = 30  # Salvar checkpoint a cada 30s
 DISPLAY_UPDATE_INTERVAL = 0.5  # Atualizar display a cada 0.5s
-LOG_LINES = 20           # Número de linhas de log visíveis
+LOG_LINES = 20            # Número de linhas de log visíveis
+
+# ==================== APIs DISPONÍVEIS ====================
+# Lista de APIs para verificação de saldo (fallback automático)
+APIS = [
+    {
+        'name': 'Mempool.space',
+        'url_template': 'https://mempool.space/api/address/{address}',
+        'parse_balance': lambda data: data.get('chain_stats', {}).get('funded_txo_sum', 0) > 0
+    },
+    {
+        'name': 'Blockchain.info',
+        'url_template': 'https://blockchain.info/balance?active={address}',
+        'parse_balance': lambda data: data.get(list(data.keys())[0] if data else '', {}).get('final_balance', 0) > 0 if data else False
+    },
+    {
+        'name': 'BlockCypher',
+        'url_template': 'https://api.blockcypher.com/v1/btc/main/addrs/{address}/balance',
+        'parse_balance': lambda data: data.get('final_balance', 0) > 0
+    }
+]
 
 # ==================== ESTATÍSTICAS GLOBAIS ====================
 class Stats:
@@ -41,28 +62,30 @@ class Stats:
         self.ultima_combinacao = ""
         self.ultimo_endereco = ""
         self.concurrency_atual = CONCURRENCY_INITIAL
-        self.erros_429_consecutivos = 0
+        self.erros_consecutivos = 0
         self.sucessos_consecutivos = 0
+        self.modo_operacao = ""  # Armazena o modo (11+1 ou 10+2)
         
+    def registrar_sucesso(self):
+        """Registra um sucesso e ajusta concorrência"""
+        self.sucessos_consecutivos += 1
+        self.erros_consecutivos = 0
+        
+        # Se tiver muitos sucessos, aumentar concorrência gradualmente
+        if self.sucessos_consecutivos >= 30 and self.concurrency_atual < CONCURRENCY_MAX:
+            self.concurrency_atual = min(CONCURRENCY_MAX, self.concurrency_atual + 2)
+            self.sucessos_consecutivos = 0
+    
     def registrar_erro(self, tipo_erro):
         """Registra um erro e ajusta concorrência se necessário"""
         self.erros_por_tipo[tipo_erro] += 1
+        self.erros_consecutivos += 1
+        self.sucessos_consecutivos = 0
         
-        if tipo_erro == "429":
-            self.erros_429_consecutivos += 1
-            self.sucessos_consecutivos = 0
-            
-            # Se tiver muitos 429 consecutivos, reduzir concorrência
-            if self.erros_429_consecutivos >= 3 and self.concurrency_atual > CONCURRENCY_MIN:
-                self.concurrency_atual = max(CONCURRENCY_MIN, self.concurrency_atual - 2)
-                self.erros_429_consecutivos = 0
-        else:
-            self.sucessos_consecutivos += 1
-            
-            # Se tiver muitos sucessos, aumentar concorrência gradualmente
-            if self.sucessos_consecutivos >= 50 and self.concurrency_atual < CONCURRENCY_MAX:
-                self.concurrency_atual = min(CONCURRENCY_MAX, self.concurrency_atual + 1)
-                self.sucessos_consecutivos = 0
+        # Se tiver muitos erros consecutivos, reduzir concorrência
+        if self.erros_consecutivos >= 5 and self.concurrency_atual > CONCURRENCY_MIN:
+            self.concurrency_atual = max(CONCURRENCY_MIN, self.concurrency_atual - 2)
+            self.erros_consecutivos = 0
     
     def total_erros(self):
         return sum(self.erros_por_tipo.values())
@@ -83,8 +106,6 @@ class Stats:
 
 stats = Stats()
 log_buffer = deque(maxlen=LOG_LINES)
-
-# Semáforo dinâmico (será atualizado conforme necessário)
 semaphore = None
 
 def atualizar_semaphore():
@@ -150,7 +171,7 @@ def salvar_checkpoint(arquivo, modo, palavra_base, palavra_var1, palavra_var2, b
         json.dump(data, f, indent=4)
 
 def salvar_carteira_com_saldo(palavra_base, palavra_var1, palavra_var2, mnemonic, info):
-    """Salva carteira com saldo no arquivo"""
+    """Salva carteira com saldo no arquivo - CORAÇÃO DO CÓDIGO"""
     with open("saldo.txt", "a") as f:
         f.write("=" * 80 + "\n")
         f.write(f"💎 CARTEIRA COM SALDO ENCONTRADA - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -166,10 +187,10 @@ def salvar_carteira_com_saldo(palavra_base, palavra_var1, palavra_var2, mnemonic
         f.write(f"Chave Pública: {info['pub_compressed_hex']}\n")
         f.write("=" * 80 + "\n\n")
 
-# ==================== FUNÇÕES BIP39/BIP44 ====================
+# ==================== FUNÇÕES BIP39/BIP44 (LÓGICA ORIGINAL) ====================
 
 def criar_mnemonic(palavra_base, palavra_var1, palavra_var2, modo):
-    """Cria mnemonic baseado no modo"""
+    """Cria mnemonic baseado no modo - LÓGICA ORIGINAL"""
     if modo == "11+1":
         palavras = [palavra_base] * 11 + [palavra_var1]
     elif modo == "10+2":
@@ -179,25 +200,25 @@ def criar_mnemonic(palavra_base, palavra_var1, palavra_var2, modo):
     return " ".join(palavras)
 
 def validar_mnemonic(mnemonic):
-    """Valida se o mnemonic é válido segundo BIP39"""
+    """Valida se o mnemonic é válido segundo BIP39 - LÓGICA ORIGINAL"""
     try:
         return Bip39MnemonicValidator().IsValid(mnemonic)
     except:
         return False
 
 def mnemonic_para_seed(mnemonic):
-    """Converte mnemonic para seed"""
+    """Converte mnemonic para seed - LÓGICA ORIGINAL"""
     return Bip39SeedGenerator(mnemonic).Generate()
 
 def derivar_bip44_btc(seed):
-    """Deriva endereço Bitcoin usando BIP44"""
+    """Deriva endereço Bitcoin usando BIP44 - LÓGICA ORIGINAL"""
     bip44_mst_ctx = Bip44.FromSeed(seed, Bip44Coins.BITCOIN)
     acct = bip44_mst_ctx.Purpose().Coin().Account(0)
     change = acct.Change(Bip44Changes.CHAIN_EXT)
     return change.AddressIndex(0)
 
 def mostrar_info(addr_index):
-    """Extrai informações da carteira"""
+    """Extrai informações da carteira - LÓGICA ORIGINAL"""
     priv_key_obj = addr_index.PrivateKey()
     pub_key_obj = addr_index.PublicKey()
     
@@ -215,77 +236,70 @@ def adicionar_log(mensagem):
     timestamp = datetime.now().strftime("%H:%M:%S")
     log_buffer.append(f"[{timestamp}] {mensagem}")
 
-# ==================== VERIFICAÇÃO DE SALDO ASSÍNCRONA ====================
+# ==================== VERIFICAÇÃO DE SALDO COM MÚLTIPLAS APIs ====================
 
-async def verificar_saldo_async(client: httpx.AsyncClient, endereco: str, mnemonic: str) -> tuple:
+async def verificar_saldo_async(client: httpx.AsyncClient, endereco: str, mnemonic: str) -> Tuple[Optional[bool], Optional[str]]:
     """
-    Verifica saldo do endereço de forma assíncrona.
-    Retorna: (resultado, tipo_erro)
-    - resultado: True (tem saldo), False (sem saldo), None (erro)
-    - tipo_erro: string com o tipo de erro ou None
+    Verifica saldo usando múltiplas APIs (fallback automático)
+    Retorna: (tem_saldo, tipo_erro)
+    MANTÉM A LÓGICA ORIGINAL: apenas verifica se tem saldo > 0
     """
-    url = f"https://mempool.space/api/address/{endereco}"
-    
-    # Log de início
     adicionar_log(f"🔍 Verificando {endereco[:20]}...")
     
-    for tentativa in range(MAX_RETRIES):
-        async with semaphore:
-            try:
-                response = await client.get(url, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    funded_sum = data.get('chain_stats', {}).get('funded_txo_sum', 0)
-                    tem_saldo = funded_sum > 0
+    # Tentar cada API em sequência
+    for api_idx, api in enumerate(APIS):
+        api_name = api['name']
+        url = api['url_template'].format(address=endereco)
+        
+        for tentativa in range(MAX_RETRIES):
+            async with semaphore:
+                try:
+                    response = await client.get(url, timeout=TIMEOUT)
                     
-                    # Log de resultado
-                    if tem_saldo:
-                        adicionar_log(f"✅ SALDO: SIM | {endereco[:20]}... | {mnemonic[:40]}...")
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Usar a função de parse específica da API
+                        try:
+                            tem_saldo = api['parse_balance'](data)
+                        except:
+                            # Se der erro no parse, tentar próxima API
+                            break
+                        
+                        # SUCESSO! Encontrou resposta válida
+                        if tem_saldo:
+                            adicionar_log(f"✅ SALDO: SIM | {endereco[:20]}... | API: {api_name}")
+                        else:
+                            adicionar_log(f"⭕ Saldo: NÃO | {endereco[:20]}... | API: {api_name}")
+                        
+                        stats.registrar_sucesso()
+                        return tem_saldo, None
+                    
+                    elif response.status_code == 429:
+                        adicionar_log(f"❌ Erro 429 ({api_name}) | {endereco[:20]}... | Tentando próxima API...")
+                        stats.registrar_erro("429")
+                        break  # Pular para próxima API
+                    
                     else:
-                        adicionar_log(f"⭕ Saldo: NÃO | {endereco[:20]}...")
-                    
-                    stats.sucessos_consecutivos += 1
-                    return tem_saldo, None
-                
-                elif response.status_code == 429:
-                    # Rate limit atingido
-                    adicionar_log(f"❌ Erro 429 (Rate Limit) | {endereco[:20]}... | Tentativa {tentativa+1}/{MAX_RETRIES}")
-                    stats.registrar_erro("429")
-                    
+                        # Outro erro HTTP, tentar próxima API
+                        break
+                        
+                except asyncio.TimeoutError:
                     if tentativa < MAX_RETRIES - 1:
-                        await asyncio.sleep(RETRY_DELAY * (tentativa + 1))
+                        await asyncio.sleep(0.5)
                         continue
                     else:
-                        return None, "429"
-                
-                else:
-                    # Outro erro HTTP
-                    adicionar_log(f"❌ Erro HTTP {response.status_code} | {endereco[:20]}...")
-                    stats.registrar_erro(f"HTTP_{response.status_code}")
-                    return None, f"HTTP_{response.status_code}"
-                    
-            except httpx.TimeoutException:
-                adicionar_log(f"❌ Timeout | {endereco[:20]}... | Tentativa {tentativa+1}/{MAX_RETRIES}")
-                stats.registrar_erro("Timeout")
-                
-                if tentativa < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY)
-                    continue
-                else:
-                    return None, "Timeout"
-                    
-            except httpx.ConnectError:
-                adicionar_log(f"❌ Erro de Conexão | {endereco[:20]}...")
-                stats.registrar_erro("ConnectError")
-                return None, "ConnectError"
-                    
-            except Exception as e:
-                adicionar_log(f"❌ Erro Desconhecido: {str(e)[:30]} | {endereco[:20]}...")
-                stats.registrar_erro("Unknown")
-                return None, "Unknown"
+                        # Timeout, tentar próxima API
+                        break
+                        
+                except Exception:
+                    # Qualquer outro erro, tentar próxima API
+                    break
     
-    return None, "MaxRetries"
+    # Se chegou aqui, todas as APIs falharam
+    adicionar_log(f"❌ Todas APIs falharam | {endereco[:20]}...")
+    stats.registrar_erro("AllAPIsFailed")
+    return None, "AllAPIsFailed"
 
 # ==================== PAINEL VISUAL ====================
 
@@ -310,10 +324,10 @@ def exibir_painel():
     pct_sucesso = (stats.carteiras_com_saldo / stats.carteiras_verificadas * 100) if stats.carteiras_verificadas > 0 else 0
     
     print("=" * 80)
-    print("🔍 BITCOIN WALLET FINDER - PAINEL DE MONITORAMENTO ULTIMATE".center(80))
+    print("🔍 BITCOIN WALLET FINDER - VERSÃO TURBO".center(80))
     print("=" * 80)
     print()
-    print(f"⏱️  TEMPO: {horas:02d}h {minutos:02d}m {segundos:02d}s | 🚀 Concorrência: {stats.concurrency_atual} req/s")
+    print(f"⏱️  TEMPO: {horas:02d}h {minutos:02d}m {segundos:02d}s | 🚀 Concorrência: {stats.concurrency_atual} req/s | 📋 Modo: {stats.modo_operacao}")
     print()
     print("📊 ESTATÍSTICAS")
     print("-" * 80)
@@ -344,13 +358,13 @@ def exibir_painel():
     
     print()
     print("=" * 80)
-    print("💡 Ctrl+C para parar | Checkpoint automático a cada 30s")
+    print("💡 Ctrl+C para parar | Checkpoint automático a cada 30s | 3 APIs com Fallback")
     print("=" * 80)
 
-# ==================== FUNÇÃO PRINCIPAL ====================
+# ==================== FUNÇÃO PRINCIPAL (MANTÉM LÓGICA ORIGINAL) ====================
 
 async def main_async():
-    """Função principal assíncrona"""
+    """Função principal - MANTÉM 100% DA LÓGICA ORIGINAL"""
     global semaphore
     
     # Inicializar semáforo
@@ -366,7 +380,7 @@ async def main_async():
     # Escolher modo
     limpar_tela()
     print("=" * 80)
-    print("🔍 BITCOIN WALLET FINDER ULTIMATE".center(80))
+    print("🔍 BITCOIN WALLET FINDER TURBO".center(80))
     print("=" * 80)
     print()
     print("📋 Modos disponíveis:")
@@ -378,6 +392,8 @@ async def main_async():
     if modo not in ["11+1", "10+2"]:
         print("❌ Modo inválido!")
         return
+    
+    stats.modo_operacao = modo  # Armazenar modo para exibir no painel
     
     # Carregar checkpoint
     checkpoint = carregar_checkpoint("checkpoint.json")
@@ -405,6 +421,11 @@ async def main_async():
         start_var2_idx = 0
         print(f"\n🆕 Começando do início...")
     
+    print(f"\n🚀 Configurações TURBO:")
+    print(f"  • Concorrência inicial: {CONCURRENCY_INITIAL} req/s")
+    print(f"  • Timeout: {TIMEOUT}s")
+    print(f"  • APIs disponíveis: {len(APIS)} (com fallback automático)")
+    
     input("\n▶️  Pressione ENTER para iniciar...")
     
     # Iniciar contagem de tempo
@@ -415,7 +436,7 @@ async def main_async():
     # Cliente HTTP assíncrono
     async with httpx.AsyncClient() as client:
         try:
-            # Loop principal
+            # Loop principal - LÓGICA ORIGINAL MANTIDA
             for i in range(start_base_idx, len(palavras)):
                 palavra_base = palavras[i]
                 
@@ -423,21 +444,20 @@ async def main_async():
                 start_j = start_var1_idx if i == start_base_idx else 0
                 
                 if modo == "11+1":
-                    # Modo 11+1
+                    # Modo 11+1 - LÓGICA ORIGINAL
                     for j in range(start_j, len(palavras)):
                         palavra_var1 = palavras[j]
                         stats.contador_total += 1
                         
-                        # Criar mnemonic
+                        # 1. VALIDAR MNEMONIC (rápido, local)
                         mnemonic = criar_mnemonic(palavra_base, palavra_var1, None, modo)
                         stats.ultima_combinacao = mnemonic
                         
-                        # Validar mnemonic (RÁPIDO, LOCAL)
                         if validar_mnemonic(mnemonic):
                             stats.contador_validas += 1
                             adicionar_log(f"✔️ Válida BIP39 | {mnemonic[:50]}...")
                             
-                            # Gerar carteira (RÁPIDO, LOCAL)
+                            # 2. GERAR CARTEIRA (rápido, local)
                             seed = mnemonic_para_seed(mnemonic)
                             addr_index = derivar_bip44_btc(seed)
                             info = mostrar_info(addr_index)
@@ -446,11 +466,12 @@ async def main_async():
                             if stats.concurrency_atual != semaphore._value:
                                 atualizar_semaphore()
                             
-                            # Verificar saldo (LENTO, ONLINE) - ASSÍNCRONO
+                            # 3. VERIFICAR SALDO (lento, online) - COM MÚLTIPLAS APIs
                             resultado, erro = await verificar_saldo_async(client, info['address'], mnemonic)
                             stats.carteiras_verificadas += 1
                             stats.ultimo_endereco = info['address']
                             
+                            # 4. SALVAR SE TEM SALDO - CORAÇÃO DO CÓDIGO
                             if resultado is True:
                                 stats.carteiras_com_saldo += 1
                                 salvar_carteira_com_saldo(palavra_base, palavra_var1, None, mnemonic, info)
@@ -466,7 +487,7 @@ async def main_async():
                             ultimo_checkpoint = time.time()
                 
                 elif modo == "10+2":
-                    # Modo 10+2
+                    # Modo 10+2 - LÓGICA ORIGINAL
                     for j in range(start_j, len(palavras)):
                         palavra_var1 = palavras[j]
                         
@@ -476,16 +497,15 @@ async def main_async():
                             palavra_var2 = palavras[k]
                             stats.contador_total += 1
                             
-                            # Criar mnemonic
+                            # 1. VALIDAR MNEMONIC (rápido, local)
                             mnemonic = criar_mnemonic(palavra_base, palavra_var1, palavra_var2, modo)
                             stats.ultima_combinacao = mnemonic
                             
-                            # Validar mnemonic (RÁPIDO, LOCAL)
                             if validar_mnemonic(mnemonic):
                                 stats.contador_validas += 1
                                 adicionar_log(f"✔️ Válida BIP39 | {mnemonic[:50]}...")
                                 
-                                # Gerar carteira (RÁPIDO, LOCAL)
+                                # 2. GERAR CARTEIRA (rápido, local)
                                 seed = mnemonic_para_seed(mnemonic)
                                 addr_index = derivar_bip44_btc(seed)
                                 info = mostrar_info(addr_index)
@@ -494,11 +514,12 @@ async def main_async():
                                 if stats.concurrency_atual != semaphore._value:
                                     atualizar_semaphore()
                                 
-                                # Verificar saldo (LENTO, ONLINE) - ASSÍNCRONO
+                                # 3. VERIFICAR SALDO (lento, online) - COM MÚLTIPLAS APIs
                                 resultado, erro = await verificar_saldo_async(client, info['address'], mnemonic)
                                 stats.carteiras_verificadas += 1
                                 stats.ultimo_endereco = info['address']
                                 
+                                # 4. SALVAR SE TEM SALDO - CORAÇÃO DO CÓDIGO
                                 if resultado is True:
                                     stats.carteiras_com_saldo += 1
                                     salvar_carteira_com_saldo(palavra_base, palavra_var1, palavra_var2, mnemonic, info)
@@ -530,7 +551,7 @@ async def main_async():
             print(f"\n📁 Arquivos gerados:")
             print(f"  • checkpoint.json - Checkpoint para retomar")
             if stats.carteiras_com_saldo > 0:
-                print(f"  • saldo.txt - {stats.carteiras_com_saldo} carteira(s) com saldo")
+                print(f"  • saldo.txt - {stats.carteiras_com_saldo} carteira(s) com saldo encontrada(s)!")
 
 def main():
     """Ponto de entrada"""
