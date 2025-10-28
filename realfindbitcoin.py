@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bitcoin Wallet Finder - VERSÃO FINAL V2
-========================================
-- 2 APIs principais (Mempool + Blockstream)
-- 1 API de backup (BlockCypher - só usa se alguma principal cair)
-- Rate limiter individual por API
-- Distribuição round-robin 50/50
-- 6 carteiras em paralelo
+Bitcoin Wallet Finder - VERSÃO ADAPTATIVA INTELIGENTE
+======================================================
+- Sistema adaptativo que começa com 1 carteira e aumenta gradualmente
+- Reduz automaticamente se der erro 429
+- 2 APIs principais + 1 backup
 - 3 endereços por carteira (BIP44+49+84)
-- Sleep 0.1s por carteira
 - Modo 11+1 e 10+2
-- 120 carteiras/minuto
-- Se uma API cair, NÃO sobrecarrega a outra
 """
 
 import os
@@ -41,15 +36,76 @@ from bip_utils import (
 # ============================================================================
 
 TIMEOUT = 10
-CONCURRENCY_PER_API = 3  # Não usado mais
-CONCURRENCY_TOTAL = 5  # 5 carteiras em paralelo
+CONCURRENCY_MIN = 1  # Começa com 1 carteira
+CONCURRENCY_MAX = 4  # Máximo 4 carteiras
 CHECKPOINT_FILE = "checkpoint.json"
 SALDO_FILE = "saldo.txt"
 BIP39_FILE = "bip39-words.txt"
 MAX_LOG_LINES = 40
 
 # Limites de APIs
-BLOCKCYPHER_LIMIT_HOUR = 98  # 98 requisições por hora (margem de segurança)
+BLOCKCYPHER_LIMIT_HOUR = 98
+
+# ============================================================================
+# CONTROLADOR ADAPTATIVO
+# ============================================================================
+
+class ControladorAdaptativo:
+    """Controla a concorrência de forma adaptativa"""
+    
+    def __init__(self):
+        self.concurrency_atual = CONCURRENCY_MIN  # Começa com 1
+        self.sucessos_consecutivos = 0
+        self.erros_429_consecutivos = 0
+        self.ultima_mudanca = time.time()
+        self.lock = asyncio.Lock()
+    
+    async def registrar_sucesso(self):
+        """Registra um sucesso e aumenta concorrência se necessário"""
+        async with self.lock:
+            self.sucessos_consecutivos += 1
+            self.erros_429_consecutivos = 0
+            
+            # Aumentar após 20 sucessos consecutivos
+            if self.sucessos_consecutivos >= 20:
+                tempo_desde_mudanca = time.time() - self.ultima_mudanca
+                
+                # Só aumenta se passou 30 segundos desde última mudança
+                if tempo_desde_mudanca >= 30 and self.concurrency_atual < CONCURRENCY_MAX:
+                    self.concurrency_atual += 1
+                    self.sucessos_consecutivos = 0
+                    self.ultima_mudanca = time.time()
+                    return True, f"✅ Aumentando concorrência para {self.concurrency_atual} carteiras"
+            
+            return False, None
+    
+    async def registrar_erro_429(self):
+        """Registra erro 429 e reduz concorrência se necessário"""
+        async with self.lock:
+            self.erros_429_consecutivos += 1
+            self.sucessos_consecutivos = 0
+            
+            # Reduzir após 3 erros 429 consecutivos
+            if self.erros_429_consecutivos >= 3:
+                if self.concurrency_atual > CONCURRENCY_MIN:
+                    self.concurrency_atual -= 1
+                    self.erros_429_consecutivos = 0
+                    self.ultima_mudanca = time.time()
+                    
+                    # Esperar 10 segundos antes de continuar
+                    await asyncio.sleep(10)
+                    return True, f"⚠️  Reduzindo concorrência para {self.concurrency_atual} carteiras (aguardando 10s)"
+                else:
+                    # Já está no mínimo, só espera
+                    self.erros_429_consecutivos = 0
+                    await asyncio.sleep(10)
+                    return True, "⚠️  Concorrência no mínimo, aguardando 10s"
+            
+            return False, None
+    
+    def get_concurrency(self):
+        """Retorna concorrência atual"""
+        return self.concurrency_atual
 
 # ============================================================================
 # RATE LIMITER POR API
@@ -65,16 +121,13 @@ class APIRateLimiter:
         self.ultima_requisicao = 0
         self.lock = asyncio.Lock()
         
-        # Limite por hora (para BlockCypher)
+        # Limite por hora
         self.limite_hora = limite_hora
         self.requisicoes_hora = []
-        self.ativa = True  # API está ativa?
+        self.ativa = True
     
     async def aguardar_vez(self) -> bool:
-        """
-        Aguarda até poder fazer a próxima requisição
-        Retorna False se atingiu limite de hora
-        """
+        """Aguarda até poder fazer a próxima requisição"""
         if not self.ativa:
             return False
         
@@ -82,14 +135,12 @@ class APIRateLimiter:
             # Verificar limite por hora
             if self.limite_hora:
                 agora = time.time()
-                # Remover requisições antigas (mais de 1 hora)
                 self.requisicoes_hora = [t for t in self.requisicoes_hora if agora - t < 3600]
                 
                 if len(self.requisicoes_hora) >= self.limite_hora:
-                    # Atingiu limite de hora!
                     return False
             
-            # Aguardar intervalo entre requisições
+            # Aguardar intervalo
             agora = time.time()
             tempo_desde_ultima = agora - self.ultima_requisicao
             
@@ -99,14 +150,13 @@ class APIRateLimiter:
             
             self.ultima_requisicao = time.time()
             
-            # Registrar requisição (para limite de hora)
             if self.limite_hora:
                 self.requisicoes_hora.append(self.ultima_requisicao)
             
             return True
     
     def desativar(self):
-        """Desativa a API (quando cai)"""
+        """Desativa a API"""
         self.ativa = False
     
     def ativar(self):
@@ -153,12 +203,10 @@ class Stats:
         if api_name in self.api_stats:
             self.api_stats[api_name]["err"] += 1
         
-        # Contar por tipo
         if tipo_erro not in self.erros_detalhados:
             self.erros_detalhados[tipo_erro] = 0
         self.erros_detalhados[tipo_erro] += 1
         
-        # Adicionar aos últimos erros
         self.ultimos_erros.append({
             "api": api_name,
             "tipo": tipo_erro,
@@ -174,7 +222,7 @@ class Stats:
         if len(self.logs) > MAX_LOG_LINES:
             self.logs.pop(0)
     
-    def mostrar_painel(self):
+    def mostrar_painel(self, concurrency_atual: int):
         """Mostra painel de estatísticas"""
         os.system('clear' if os.name == 'posix' else 'cls')
         
@@ -188,9 +236,10 @@ class Stats:
         taxa = self.carteiras_verificadas / (tempo_decorrido / 60) if tempo_decorrido > 0 else 0
         
         print("=" * 80)
-        print("🔍 BITCOIN WALLET FINDER - VERSÃO FINAL V2")
+        print("🔍 BITCOIN WALLET FINDER - VERSÃO ADAPTATIVA")
         print("=" * 80)
         print(f"⏱️  Tempo: {horas:02d}:{minutos:02d}:{segundos:02d}")
+        print(f"🎯 Concorrência atual: {concurrency_atual} carteiras em paralelo")
         print(f"📊 Testadas: {self.contador_total} | Válidas: {self.contador_validas} | Verificadas: {self.carteiras_verificadas}")
         print(f"💎 Com saldo: {total_com_saldo} (BIP44: {self.carteiras_com_saldo_bip44}, BIP49: {self.carteiras_com_saldo_bip49}, BIP84: {self.carteiras_com_saldo_bip84})")
         print(f"⚡ Taxa: {taxa:.1f} carteiras/min")
@@ -240,10 +289,10 @@ def mnemonic_para_seed(mnemonic: str, passphrase: str = "") -> bytes:
     return Bip39SeedGenerator(mnemonic).Generate(passphrase)
 
 def derivar_enderecos(seed: bytes) -> Dict[str, Dict[str, str]]:
-    """Deriva os 3 tipos de endereços (BIP44, BIP49, BIP84)"""
+    """Deriva os 3 tipos de endereços"""
     enderecos = {}
     
-    # BIP44 - Legacy (m/44'/0'/0'/0/0)
+    # BIP44
     try:
         bip44_mst_ctx = Bip44.FromSeed(seed, Bip44Coins.BITCOIN)
         bip44_acc = bip44_mst_ctx.Purpose().Coin().Account(0)
@@ -261,7 +310,7 @@ def derivar_enderecos(seed: bytes) -> Dict[str, Dict[str, str]]:
     except:
         pass
     
-    # BIP49 - SegWit (m/49'/0'/0'/0/0)
+    # BIP49
     try:
         bip49_mst_ctx = Bip49.FromSeed(seed, Bip49Coins.BITCOIN)
         bip49_acc = bip49_mst_ctx.Purpose().Coin().Account(0)
@@ -279,7 +328,7 @@ def derivar_enderecos(seed: bytes) -> Dict[str, Dict[str, str]]:
     except:
         pass
     
-    # BIP84 - Native SegWit (m/84'/0'/0'/0/0)
+    # BIP84
     try:
         bip84_mst_ctx = Bip84.FromSeed(seed, Bip84Coins.BITCOIN)
         bip84_acc = bip84_mst_ctx.Purpose().Coin().Account(0)
@@ -300,7 +349,7 @@ def derivar_enderecos(seed: bytes) -> Dict[str, Dict[str, str]]:
     return enderecos
 
 # ============================================================================
-# VERIFICAÇÃO DE SALDO - 3 APIs
+# VERIFICAÇÃO DE SALDO
 # ============================================================================
 
 async def verificar_saldo_mempool(client: httpx.AsyncClient, endereco: str) -> Tuple[Optional[bool], Optional[int], Optional[str], Optional[str]]:
@@ -371,25 +420,22 @@ async def verificar_saldo_blockcypher(client: httpx.AsyncClient, endereco: str) 
 # ============================================================================
 
 class DistribuidorAPIs:
-    """Distribui requisições entre APIs com rate limiting"""
+    """Distribui requisições entre APIs"""
     
-    def __init__(self):
+    def __init__(self, controlador: ControladorAdaptativo):
+        self.controlador = controlador
         self.limiters = {
             "Mempool": APIRateLimiter("Mempool", 3.0),
             "Blockstream": APIRateLimiter("Blockstream", 3.0),
-            "BlockCypher": APIRateLimiter("BlockCypher", 1.0, limite_hora=BLOCKCYPHER_LIMIT_HOUR)  # 1 req/s, para em 98 req/hora
+            "BlockCypher": APIRateLimiter("BlockCypher", 1.0, limite_hora=BLOCKCYPHER_LIMIT_HOUR)
         }
         
-        # APIs principais (usadas primeiro)
         self.apis_principais = ["Mempool", "Blockstream"]
         self.indice_principal = 0
-        
-        # API de backup
         self.api_backup = "BlockCypher"
     
     def _escolher_api(self) -> str:
-        """Escolhe próxima API disponível (round-robin)"""
-        # Tentar APIs principais primeiro
+        """Escolhe próxima API disponível"""
         for _ in range(len(self.apis_principais)):
             api = self.apis_principais[self.indice_principal]
             self.indice_principal = (self.indice_principal + 1) % len(self.apis_principais)
@@ -397,15 +443,13 @@ class DistribuidorAPIs:
             if self.limiters[api].ativa:
                 return api
         
-        # Se nenhuma principal está ativa, usar backup
         if self.limiters[self.api_backup].ativa:
             return self.api_backup
         
-        # Nenhuma API disponível!
         return None
     
     async def verificar_endereco(self, client: httpx.AsyncClient, endereco: str, stats: Stats) -> Tuple[bool, int, Optional[str]]:
-        """Verifica saldo de um endereço usando API disponível"""
+        """Verifica saldo de um endereço"""
         
         api_name = self._escolher_api()
         
@@ -413,16 +457,13 @@ class DistribuidorAPIs:
             stats.adicionar_log("❌ Nenhuma API disponível!")
             return False, 0, None
         
-        # Aguardar rate limit
         pode_fazer = await self.limiters[api_name].aguardar_vez()
         
         if not pode_fazer:
-            # Atingiu limite (BlockCypher)
-            stats.adicionar_log(f"⚠️  {api_name} atingiu limite de hora!")
+            stats.adicionar_log(f"⚠️  {api_name} atingiu limite!")
             self.limiters[api_name].desativar()
             return False, 0, None
         
-        # Fazer requisição
         try:
             if api_name == "Mempool":
                 resultado = await verificar_saldo_mempool(client, endereco)
@@ -436,14 +477,20 @@ class DistribuidorAPIs:
             if erro:
                 stats.registrar_erro_api(api_name, erro)
                 
-                # Se der erro 429, desativar API temporariamente
                 if erro == "429":
-                    stats.adicionar_log(f"⚠️  {api_name} retornou 429 (rate limit)!")
-                    self.limiters[api_name].desativar()
+                    mudou, msg = await self.controlador.registrar_erro_429()
+                    if mudou and msg:
+                        stats.adicionar_log(msg)
                 
                 return False, 0, None
             
             stats.registrar_sucesso_api(api_name)
+            
+            # Registrar sucesso no controlador
+            mudou, msg = await self.controlador.registrar_sucesso()
+            if mudou and msg:
+                stats.adicionar_log(msg)
+            
             return tem_saldo, saldo, api_name
             
         except Exception as e:
@@ -451,7 +498,7 @@ class DistribuidorAPIs:
             return False, 0, None
 
 # ============================================================================
-# PROCESSAMENTO DE CARTEIRA
+# PROCESSAMENTO
 # ============================================================================
 
 async def processar_carteira(
@@ -463,25 +510,19 @@ async def processar_carteira(
     stats: Stats,
     distribuidor: DistribuidorAPIs
 ):
-    """Processa uma carteira: deriva 3 endereços e verifica saldo"""
+    """Processa uma carteira"""
     
     try:
-        # Gerar seed
         seed = mnemonic_para_seed(mnemonic)
-        
-        # Derivar os 3 tipos de endereços
         enderecos = derivar_enderecos(seed)
         
-        # Verificar os 3 endereços SEQUENCIALMENTE
         for bip_type, info in enderecos.items():
             endereco = info["endereco"]
             stats.adicionar_log(f"🔍 {bip_type} | {endereco[:24]}...")
             
-            # Verificar saldo (distribuidor escolhe a API)
             tem_saldo, saldo, api_name = await distribuidor.verificar_endereco(client, endereco, stats)
             
             if tem_saldo:
-                # ENCONTROU SALDO!
                 if bip_type == "BIP44":
                     stats.carteiras_com_saldo_bip44 += 1
                 elif bip_type == "BIP49":
@@ -492,25 +533,16 @@ async def processar_carteira(
                 saldo_btc = saldo / 100000000.0
                 stats.adicionar_log(
                     f"✅ SALDO: {saldo} sat ({saldo_btc:.8f} BTC) | "
-                    f"{bip_type} ({info['tipo']}) | {endereco[:24]}... | {api_name}"
+                    f"{bip_type} | {endereco[:24]}... | {api_name}"
                 )
                 
-                # Salvar em arquivo
                 salvar_carteira_com_saldo(palavra_base, palavra_var1, palavra_var2, mnemonic, info, bip_type, saldo, saldo_btc, api_name)
-            else:
-                if api_name:
-                    stats.adicionar_log(f"⭕ Sem saldo | {bip_type} | {endereco[:24]}... | {api_name}")
-                else:
-                    stats.adicionar_log(f"❌ Erro | {bip_type} | {endereco[:24]}...")
         
-        # Incrementar contador UMA VEZ por carteira
         stats.carteiras_verificadas += 1
-        
-        # Sleep de 0.1s após processar carteira
         await asyncio.sleep(0.1)
         
     except Exception as e:
-        stats.adicionar_log(f"❌ Erro ao processar carteira: {type(e).__name__}")
+        stats.adicionar_log(f"❌ Erro: {type(e).__name__}")
 
 # ============================================================================
 # SALVAMENTO
@@ -527,7 +559,7 @@ def salvar_carteira_com_saldo(
     saldo_btc: float,
     api_name: str
 ):
-    """Salva carteira com saldo no arquivo"""
+    """Salva carteira com saldo"""
     with open(SALDO_FILE, "a") as f:
         f.write("=" * 80 + "\n")
         f.write("💎 CARTEIRA COM SALDO ENCONTRADA\n")
@@ -552,8 +584,8 @@ def salvar_carteira_com_saldo(
         f.write(f"Chave Pública (HEX): {info['pub_hex']}\n")
         f.write("=" * 80 + "\n\n")
 
-def salvar_checkpoint(palavra_base: str, palavra_var1: str, palavra_var2: Optional[str], stats: Stats, modo: str):
-    """Salva checkpoint em JSON"""
+def salvar_checkpoint(palavra_base: str, palavra_var1: str, palavra_var2: Optional[str], stats: Stats, modo: str, concurrency: int):
+    """Salva checkpoint"""
     checkpoint = {
         "modo": modo,
         "palavra_base": palavra_base,
@@ -566,6 +598,7 @@ def salvar_checkpoint(palavra_base: str, palavra_var1: str, palavra_var2: Option
         "carteiras_com_saldo_bip44": stats.carteiras_com_saldo_bip44,
         "carteiras_com_saldo_bip49": stats.carteiras_com_saldo_bip49,
         "carteiras_com_saldo_bip84": stats.carteiras_com_saldo_bip84,
+        "concurrency": concurrency,
         "timestamp": datetime.now().isoformat()
     }
     
@@ -579,7 +612,6 @@ def salvar_checkpoint(palavra_base: str, palavra_var1: str, palavra_var2: Option
 async def main():
     """Função principal"""
     
-    # Carregar palavras BIP39
     if not os.path.exists(BIP39_FILE):
         print(f"❌ Arquivo {BIP39_FILE} não encontrado!")
         return
@@ -590,18 +622,16 @@ async def main():
     if len(palavras) != 2048:
         print(f"⚠️  Esperadas 2048 palavras, encontradas {len(palavras)}")
     
-    # Escolher modo
     print("Escolha o modo:")
-    print("1. Modo 11+1 (11 palavras repetidas + 1 variável)")
-    print("2. Modo 10+2 (10 palavras repetidas + 2 variáveis)")
+    print("1. Modo 11+1")
+    print("2. Modo 10+2")
     
     escolha = input("Digite 1 ou 2: ").strip()
     modo = "11+1" if escolha == "1" else "10+2"
     
-    # Inicializar estatísticas
     stats = Stats()
+    controlador = ControladorAdaptativo()
     
-    # Carregar checkpoint se existir
     start_base_idx = 0
     start_var1_idx = 0
     start_var2_idx = 0
@@ -610,7 +640,6 @@ async def main():
         with open(CHECKPOINT_FILE, 'r') as f:
             checkpoint = json.load(f)
         
-        # Restaurar estatísticas
         stats.contador_total = checkpoint.get('contador_total', 0)
         stats.contador_validas = checkpoint.get('contador_validas', 0)
         stats.contador_invalidas = checkpoint.get('contador_invalidas', 0)
@@ -619,7 +648,10 @@ async def main():
         stats.carteiras_com_saldo_bip49 = checkpoint.get('carteiras_com_saldo_bip49', 0)
         stats.carteiras_com_saldo_bip84 = checkpoint.get('carteiras_com_saldo_bip84', 0)
         
-        # Encontrar índices
+        # Restaurar concorrência
+        if 'concurrency' in checkpoint:
+            controlador.concurrency_atual = checkpoint['concurrency']
+        
         palavra_base = checkpoint['palavra_base']
         palavra_var1 = checkpoint['palavra_var1']
         palavra_var2 = checkpoint.get('palavra_var2')
@@ -646,53 +678,39 @@ async def main():
             start_base_idx = 0
             start_var1_idx = 0
             start_var2_idx = 0
-    else:
-        start_base_idx = 0
-        start_var1_idx = 0
-        start_var2_idx = 0
-        print("ℹ️  Nenhum checkpoint encontrado, começando do início")
     
     print(f"\n🚀 Iniciando busca em modo {modo}...")
-    print(f"⚡ Concorrência: 5 carteiras em paralelo")
-    print(f"🌐 2 APIs principais + 1 backup")
-    print(f"📊 3 derivações por mnemonic (BIP44+BIP49+BIP84)")
-    print(f"🔒 BlockCypher: 1 req/s, para em 98 req/hora")
+    print(f"🎯 Sistema ADAPTATIVO: Começa com {CONCURRENCY_MIN}, aumenta até {CONCURRENCY_MAX}")
+    print(f"📊 3 derivações por mnemonic (BIP44+49+84)")
     print("\nPressione Ctrl+C para parar com segurança\n")
     
-    # Criar cliente HTTP e distribuidor
     async with httpx.AsyncClient() as client:
-        distribuidor = DistribuidorAPIs()
+        distribuidor = DistribuidorAPIs(controlador)
         tarefas_pendentes = []
         
         try:
             if modo == "11+1":
-                # MODO 11+1
                 for i in range(start_base_idx, len(palavras)):
                     palavra_base = palavras[i]
-                    
                     start_j = start_var1_idx if i == start_base_idx else 0
                     
                     for j in range(start_j, len(palavras)):
                         palavra_var1 = palavras[j]
-                        
-                        # Criar mnemonic (11+1)
                         mnemonic = " ".join([palavra_base] * 11 + [palavra_var1])
-                        
                         stats.contador_total += 1
                         
-                        # Validar mnemonic
                         if validar_mnemonic(mnemonic):
                             stats.contador_validas += 1
                             stats.adicionar_log(f"✔️ BIP39 Válida | {mnemonic[:60]}...")
                             
-                            # Criar tarefa assíncrona para processar
                             tarefa = asyncio.create_task(
                                 processar_carteira(client, mnemonic, palavra_base, palavra_var1, None, stats, distribuidor)
                             )
                             tarefas_pendentes.append(tarefa)
                             
-                            # Limitar tarefas pendentes (5 carteiras em paralelo)
-                            if len(tarefas_pendentes) >= 5:
+                            # Limitar tarefas (ADAPTATIVO!)
+                            concurrency = controlador.get_concurrency()
+                            if len(tarefas_pendentes) >= concurrency:
                                 done, tarefas_pendentes = await asyncio.wait(
                                     tarefas_pendentes,
                                     return_when=asyncio.FIRST_COMPLETED
@@ -701,47 +719,38 @@ async def main():
                         else:
                             stats.contador_invalidas += 1
                         
-                        # Mostrar painel a cada 10 combinações
                         if stats.contador_total % 10 == 0:
-                            stats.mostrar_painel()
+                            stats.mostrar_painel(controlador.get_concurrency())
                         
-                        # Salvar checkpoint a cada 100 combinações
                         if stats.contador_total % 100 == 0:
-                            salvar_checkpoint(palavra_base, palavra_var1, None, stats, modo)
+                            salvar_checkpoint(palavra_base, palavra_var1, None, stats, modo, controlador.get_concurrency())
             
-            else:  # modo == "10+2"
-                # MODO 10+2
+            else:  # modo 10+2
                 for i in range(start_base_idx, len(palavras)):
                     palavra_base = palavras[i]
-                    
                     start_j = start_var1_idx if i == start_base_idx else 0
                     
                     for j in range(start_j, len(palavras)):
                         palavra_var1 = palavras[j]
-                        
                         start_k = start_var2_idx if i == start_base_idx and j == start_var1_idx else 0
                         
                         for k in range(start_k, len(palavras)):
                             palavra_var2 = palavras[k]
-                            
-                            # Criar mnemonic (10+2)
                             mnemonic = " ".join([palavra_base] * 10 + [palavra_var1, palavra_var2])
-                            
                             stats.contador_total += 1
                             
-                            # Validar mnemonic
                             if validar_mnemonic(mnemonic):
                                 stats.contador_validas += 1
                                 stats.adicionar_log(f"✔️ BIP39 Válida | {mnemonic[:60]}...")
                                 
-                                # Criar tarefa assíncrona para processar
                                 tarefa = asyncio.create_task(
                                     processar_carteira(client, mnemonic, palavra_base, palavra_var1, palavra_var2, stats, distribuidor)
                                 )
                                 tarefas_pendentes.append(tarefa)
                                 
-                                # Limitar tarefas pendentes (5 carteiras em paralelo)
-                                if len(tarefas_pendentes) >= 5:
+                                # Limitar tarefas (ADAPTATIVO!)
+                                concurrency = controlador.get_concurrency()
+                                if len(tarefas_pendentes) >= concurrency:
                                     done, tarefas_pendentes = await asyncio.wait(
                                         tarefas_pendentes,
                                         return_when=asyncio.FIRST_COMPLETED
@@ -750,32 +759,27 @@ async def main():
                             else:
                                 stats.contador_invalidas += 1
                             
-                            # Mostrar painel a cada 10 combinações
                             if stats.contador_total % 10 == 0:
-                                stats.mostrar_painel()
+                                stats.mostrar_painel(controlador.get_concurrency())
                             
-                            # Salvar checkpoint a cada 100 combinações
                             if stats.contador_total % 100 == 0:
-                                salvar_checkpoint(palavra_base, palavra_var1, palavra_var2, stats, modo)
+                                salvar_checkpoint(palavra_base, palavra_var1, palavra_var2, stats, modo, controlador.get_concurrency())
             
-            # Aguardar tarefas pendentes finalizarem
             if tarefas_pendentes:
                 await asyncio.wait(tarefas_pendentes)
         
         except KeyboardInterrupt:
-            print("\n\n⚠️  Programa interrompido pelo usuário")
+            print("\n\n⚠️  Programa interrompido")
             
-            # Aguardar tarefas pendentes finalizarem
             if tarefas_pendentes:
-                print("⏳ Aguardando tarefas pendentes finalizarem...")
+                print("⏳ Aguardando tarefas...")
                 await asyncio.wait(tarefas_pendentes)
             
-            # Salvar checkpoint final
             if 'palavra_base' in locals():
-                salvar_checkpoint(palavra_base, palavra_var1, palavra_var2 if modo == "10+2" else None, stats, modo)
+                salvar_checkpoint(palavra_base, palavra_var1, palavra_var2 if modo == "10+2" else None, stats, modo, controlador.get_concurrency())
         
         finally:
-            stats.mostrar_painel()
+            stats.mostrar_painel(controlador.get_concurrency())
             print("\n✅ Programa finalizado!")
 
 if __name__ == "__main__":
