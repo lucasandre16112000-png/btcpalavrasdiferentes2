@@ -46,7 +46,7 @@ SALDO_MINIMO_SAQUE = 50000  # 0.0005 BTC
 
 
 # Modo de teste (não envia transações reais)
-MODO_TESTE = False  # Mude para True para testar sem enviar
+MODO_TESTE = True  # Mude para True para testar sem enviar
 # ============================================================================
 # FILA COMPARTILHADA DE ENDEREÇOS
 # ============================================================================
@@ -161,14 +161,21 @@ class WorkerAPI:
                 # Se erro 429, desativar temporariamente
                 if erro == "429":
                     self.erros_429_consecutivos += 1
+                    agora = time.time()
                     
-                    if self.erros_429_consecutivos >= 10:
-                        agora = time.time()
-                        tempo_desativacao = 300  # 5 minutos
-                        
-                        self.ativo = False
-                        self.desativado_ate = agora + tempo_desativacao
-                        print(f"\n🔴 {self.nome} desativado por {tempo_desativacao//60} minutos (muitos erros 429)!\n")
+                    # Desativar progressivamente
+                    if self.erros_429_consecutivos == 1:
+                        tempo_desativacao = 60  # 1 minuto no primeiro erro
+                    elif self.erros_429_consecutivos == 2:
+                        tempo_desativacao = 180  # 3 minutos no segundo
+                    elif self.erros_429_consecutivos == 3:
+                        tempo_desativacao = 300  # 5 minutos no terceiro
+                    else:
+                        tempo_desativacao = 600  # 10 minutos a partir do quarto
+                    
+                    self.ativo = False
+                    self.desativado_ate = agora + tempo_desativacao
+                    print(f"\n🔴 {self.nome} desativado por {tempo_desativacao//60} min (erro 429 #{self.erros_429_consecutivos})!\n")
                 
                 return False
             
