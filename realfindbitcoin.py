@@ -46,7 +46,7 @@ SALDO_MINIMO_SAQUE = 50000  # 0.0005 BTC
 
 
 # Modo de teste (não envia transações reais)
-MODO_TESTE = True  # Mude para True para testar sem enviar
+MODO_TESTE = False  # Mude para True para testar sem enviar
 # ============================================================================
 # FILA COMPARTILHADA DE ENDEREÇOS
 # ============================================================================
@@ -138,12 +138,13 @@ class WorkerAPI:
         self.ultima_requisicao = time.time()
         return True
     
-    async def processar_endereco(self, client, endereco_info, stats):
+    async def processar_endereco(self, client, endereco_info, stats, fila):
         """Processa um endereço usando esta API"""
         
         # Aguardar rate limit
         if not await self.aguardar_rate_limit():
-            # API desativada, recolocar na fila
+            # API desativada, recolocar endereço na fila
+            await fila.adicionar(endereco_info)
             return False
         
         # Verificar saldo
@@ -229,14 +230,10 @@ class WorkerAPI:
                 endereco_info = await fila.pegar()
                 
                 # Processar endereço
-                sucesso = await self.processar_endereco(client, endereco_info, stats)
+                sucesso = await self.processar_endereco(client, endereco_info, stats, fila)
                 
                 # Marcar como processado
                 fila.marcar_processado()
-                
-                # Se não conseguiu processar (API desativada), recolocar na fila
-                if not sucesso and not self.ativo:
-                    await fila.adicionar(endereco_info)
             
             except Exception as e:
                 stats.adicionar_log(f"❌ Worker {self.nome} erro: {str(e)[:50]}")
@@ -593,8 +590,7 @@ class Estatisticas:
         
         total_com_saldo = sum(self.contador_com_saldo.values())
         
-        print("\033[2J\033[H")  # Limpa tela
-        print("=" * 80)
+        print("\n" + "=" * 80)
         print("🔍 BITCOIN WALLET FINDER - WORKERS INDEPENDENTES")
         print("=" * 80)
         print(f"⏱️  Tempo: {horas:02d}:{minutos:02d}:{segundos:02d}")
@@ -895,18 +891,16 @@ async def main():
     stats = Estatisticas()
     fila = FilaEnderecos()
     
-    # Criar workers (1 por API)
+    # Criar workers (1 por API) - AS 4 MELHORES!
     workers = [
         WorkerAPI('Mempool', 2.0, verificar_saldo_mempool),
-        WorkerAPI('Bitaps', 1.5, verificar_saldo_bitaps),
+        WorkerAPI('Bitaps', 1.0, verificar_saldo_bitaps),
         WorkerAPI('BlockCypher', 1.0, verificar_saldo_blockcypher, 90),
-        WorkerAPI('Blockchain', 0.1, verificar_saldo_blockchain),
-        WorkerAPI('Blocknomics', 0.016, verificar_saldo_blocknomics),
-        WorkerAPI('Blockchair', 1.0, verificar_saldo_blockchair)
+        WorkerAPI('Blockchain', 0.1, verificar_saldo_blockchain)
     ]
     
     print(f"\n🚀 Iniciando busca em modo {modo}...")
-    print(f"🎯 6 Workers independentes (cada API no seu ritmo)")
+    print(f"🎯 4 Workers independentes (Mempool, Bitaps, BlockCypher, Blockchain)")
     print(f"💰 Saque automático para: {ENDERECO_DESTINO}")
     print("\nPressione Ctrl+C para parar com segurança\n")
     
