@@ -46,7 +46,7 @@ SALDO_MINIMO_SAQUE = 50000  # 0.0005 BTC
 
 
 # Modo de teste (não envia transações reais)
-MODO_TESTE = False  # Mude para True para testar sem enviar
+MODO_TESTE = True  # Mude para True para testar sem enviar
 # ============================================================================
 # FILA COMPARTILHADA DE ENDEREÇOS
 # ============================================================================
@@ -590,7 +590,11 @@ class Estatisticas:
         
         total_com_saldo = sum(self.contador_com_saldo.values())
         
-        print("\n" + "=" * 80)
+        # Limpar tela (funciona no Windows WSL)
+        import os
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        print("=" * 80)
         print("🔍 BITCOIN WALLET FINDER - WORKERS INDEPENDENTES")
         print("=" * 80)
         print(f"⏱️  Tempo: {horas:02d}:{minutos:02d}:{segundos:02d}")
@@ -891,16 +895,15 @@ async def main():
     stats = Estatisticas()
     fila = FilaEnderecos()
     
-    # Criar workers (1 por API) - AS 4 MELHORES!
+    # Criar workers (1 por API) - AS 3 MELHORES (100% sucesso)!
     workers = [
         WorkerAPI('Mempool', 2.0, verificar_saldo_mempool),
-        WorkerAPI('Bitaps', 1.0, verificar_saldo_bitaps),
         WorkerAPI('BlockCypher', 1.0, verificar_saldo_blockcypher, 90),
         WorkerAPI('Blockchain', 0.1, verificar_saldo_blockchain)
     ]
     
     print(f"\n🚀 Iniciando busca em modo {modo}...")
-    print(f"🎯 4 Workers independentes (Mempool, Bitaps, BlockCypher, Blockchain)")
+    print(f"🎯 3 Workers independentes (Mempool, BlockCypher, Blockchain - 100% sucesso!)")
     print(f"💰 Saque automático para: {ENDERECO_DESTINO}")
     print("\nPressione Ctrl+C para parar com segurança\n")
     
