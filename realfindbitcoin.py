@@ -691,8 +691,8 @@ async def main():
                             )
                             tarefas_pendentes.append(tarefa)
                             
-        # Limitar tarefas pendentes (5 carteiras em paralelo)
-        if len(tarefas_pendentes) >= 5:
+                            # Limitar tarefas pendentes (5 carteiras em paralelo)
+                            if len(tarefas_pendentes) >= 5:
                                 done, tarefas_pendentes = await asyncio.wait(
                                     tarefas_pendentes,
                                     return_when=asyncio.FIRST_COMPLETED
@@ -740,8 +740,8 @@ async def main():
                                 )
                                 tarefas_pendentes.append(tarefa)
                                 
-                        # Limitar tarefas pendentes (5 carteiras em paralelo)
-                        if len(tarefas_pendentes) >= 5:
+                                # Limitar tarefas pendentes (5 carteiras em paralelo)
+                                if len(tarefas_pendentes) >= 5:
                                     done, tarefas_pendentes = await asyncio.wait(
                                         tarefas_pendentes,
                                         return_when=asyncio.FIRST_COMPLETED
