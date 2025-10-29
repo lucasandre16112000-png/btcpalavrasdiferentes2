@@ -48,8 +48,7 @@ ENDERECO_DESTINO = "bc1qy34f7mqu952svl3eaklwqzw9v6h6paa5led9rs"
 SALDO_MINIMO_SAQUE = 50000  # 0.0005 BTC
 MODO_TESTE = False  # Mude para True para testar sem enviar
 
-# Limites de APIs
-BLOCKCYPHER_LIMIT_HOUR = 98
+
 
 # ============================================================================
 # CONTROLADOR ADAPTATIVO
@@ -119,7 +118,7 @@ class ControladorAdaptativo:
 class APIRateLimiter:
     """Rate limiter individual para cada API"""
     
-    def __init__(self, nome: str, req_por_segundo: float, limite_hora: Optional[int] = None):
+    def __init__(self, nome: str, req_por_segundo: float, limite_hora: Optional[int] = None, limite_mes: Optional[int] = None):
         self.nome = nome
         self.req_por_segundo = req_por_segundo
         self.intervalo = 1.0 / req_por_segundo
@@ -129,6 +128,11 @@ class APIRateLimiter:
         # Limite por hora
         self.limite_hora = limite_hora
         self.requisicoes_hora = []
+        
+        # Limite por mês (30 dias)
+        self.limite_mes = limite_mes
+        self.requisicoes_mes = []
+        
         self.ativa = True
         
         # Controle de erro 429 INDIVIDUAL
@@ -149,16 +153,27 @@ class APIRateLimiter:
                 return True
         
         async with self.lock:
+            agora = time.time()
+            
             # Verificar limite por hora
             if self.limite_hora:
-                agora = time.time()
                 self.requisicoes_hora = [t for t in self.requisicoes_hora if agora - t < 3600]
                 
                 if len(self.requisicoes_hora) >= self.limite_hora:
                     return False
             
+            # Verificar limite por mês (30 dias = 2592000 segundos)
+            if self.limite_mes:
+                self.requisicoes_mes = [t for t in self.requisicoes_mes if agora - t < 2592000]
+                
+                if len(self.requisicoes_mes) >= self.limite_mes:
+                    # Desativar por 1 mês
+                    self.ativa = False
+                    self.desativado_ate = agora + 2592000  # 30 dias
+                    print(f"❌ {self.nome} atingiu limite mensal de {self.limite_mes} requisições! Desativado por 1 mês.")
+                    return False
+            
             # Aguardar intervalo
-            agora = time.time()
             tempo_desde_ultima = agora - self.ultima_requisicao
             
             if tempo_desde_ultima < self.intervalo:
@@ -167,8 +182,11 @@ class APIRateLimiter:
             
             self.ultima_requisicao = time.time()
             
+            # Registrar requisição
             if self.limite_hora:
                 self.requisicoes_hora.append(self.ultima_requisicao)
+            if self.limite_mes:
+                self.requisicoes_mes.append(self.ultima_requisicao)
             
             return True
     
@@ -224,11 +242,9 @@ class Stats:
         # Estatísticas por API
         self.api_stats = {
             "Mempool": {"ok": 0, "err": 0},
-            "BlockCypher": {"ok": 0, "err": 0},
             "Bitaps": {"ok": 0, "err": 0},
             "Blockchain": {"ok": 0, "err": 0},
-            "Blockstream": {"ok": 0, "err": 0},
-            "Blocknomics": {"ok": 0, "err": 0}
+            "Blockstream": {"ok": 0, "err": 0}
         }
         
         # Erros detalhados
@@ -441,26 +457,6 @@ async def verificar_saldo_blockstream(client: httpx.AsyncClient, endereco: str) 
     except Exception as e:
         return None, None, None, f"Error_{type(e).__name__}"
 
-async def verificar_saldo_blockcypher(client: httpx.AsyncClient, endereco: str) -> Tuple[Optional[bool], Optional[int], Optional[str], Optional[str]]:
-    """API 3: BlockCypher (BACKUP)"""
-    try:
-        url = f"https://api.blockcypher.com/v1/btc/main/addrs/{endereco}/balance"
-        response = await client.get(url, timeout=TIMEOUT)
-        
-        if response.status_code == 200:
-            data = response.json()
-            saldo = data.get('final_balance', 0)
-            return saldo > 0, saldo, "BlockCypher", None
-        elif response.status_code == 429:
-            return None, None, None, "429"
-        else:
-            return None, None, None, f"HTTP_{response.status_code}"
-    except asyncio.TimeoutError:
-        return None, None, None, "Timeout"
-    except httpx.ConnectError:
-        return None, None, None, "ConnectionError"
-    except Exception as e:
-        return None, None, None, f"Error_{type(e).__name__}"
 
 async def verificar_saldo_blockchain(client: httpx.AsyncClient, endereco: str) -> Tuple[Optional[bool], Optional[int], Optional[str], Optional[str]]:
     """API 4: Blockchain.info"""
@@ -503,26 +499,6 @@ async def verificar_saldo_bitaps(client: httpx.AsyncClient, endereco: str) -> Tu
     except Exception as e:
         return None, None, None, f"Error_{type(e).__name__}"
 
-async def verificar_saldo_blocknomics(client: httpx.AsyncClient, endereco: str) -> Tuple[Optional[bool], Optional[int], Optional[str], Optional[str]]:
-    """API 6: Blocknomics"""
-    try:
-        url = f"https://www.blocknomics.com/api/balance/{endereco}"
-        response = await client.get(url, timeout=TIMEOUT)
-        
-        if response.status_code == 200:
-            data = response.json()
-            saldo = data.get('response', [{}])[0].get('confirmed', 0) if data.get('response') else 0
-            return saldo > 0, saldo, "Blocknomics", None
-        elif response.status_code == 429:
-            return None, None, None, "429"
-        else:
-            return None, None, None, f"HTTP_{response.status_code}"
-    except asyncio.TimeoutError:
-        return None, None, None, "Timeout"
-    except httpx.ConnectError:
-        return None, None, None, "ConnectionError"
-    except Exception as e:
-        return None, None, None, f"Error_{type(e).__name__}"
 
 # ============================================================================
 # DISTRIBUIDOR DE APIs
@@ -535,31 +511,23 @@ class DistribuidorAPIs:
         self.controlador = controlador
         self.limiters = {
             "Mempool": APIRateLimiter("Mempool", 2.0),  # 2 req/s (principal)
-            "BlockCypher": APIRateLimiter("BlockCypher", 1.0, limite_hora=90),  # 1 req/s + 90/hora
             "Bitaps": APIRateLimiter("Bitaps", 1.0),  # 1 req/s
             "Blockchain": APIRateLimiter("Blockchain", 0.1),  # 0.1 req/s (1 a cada 10s)
-            "Blockstream": APIRateLimiter("Blockstream", 1.5),  # 1.5 req/s (backup)
-            "Blocknomics": APIRateLimiter("Blocknomics", 0.016)  # 0.016 req/s (1 a cada 62.5s)
+            "Blockstream": APIRateLimiter("Blockstream", 3.0, limite_mes=500000),  # 3 req/s + 500k/mês
         }
         
-        self.apis_principais = ["Mempool", "BlockCypher", "Bitaps", "Blockchain"]
+        self.apis_principais = ["Mempool", "Bitaps", "Blockchain", "Blockstream"]
         self.indice_principal = 0
-        self.apis_backup = ["Blockstream", "Blocknomics"]
     
     def _escolher_api(self) -> str:
         """Escolhe próxima API disponível"""
-        # Tentar APIs principais primeiro
+        # Tentar todas as APIs
         for _ in range(len(self.apis_principais)):
             api = self.apis_principais[self.indice_principal]
             self.indice_principal = (self.indice_principal + 1) % len(self.apis_principais)
             
             if self.limiters[api].ativa:
                 return api
-        
-        # Se nenhuma principal disponível, tentar backups
-        for api_backup in self.apis_backup:
-            if self.limiters[api_backup].ativa:
-                return api_backup
         
         return None
     
@@ -584,14 +552,10 @@ class DistribuidorAPIs:
                 resultado = await verificar_saldo_mempool(client, endereco)
             elif api_name == "Blockstream":
                 resultado = await verificar_saldo_blockstream(client, endereco)
-            elif api_name == "BlockCypher":
-                resultado = await verificar_saldo_blockcypher(client, endereco)
             elif api_name == "Blockchain":
                 resultado = await verificar_saldo_blockchain(client, endereco)
             elif api_name == "Bitaps":
                 resultado = await verificar_saldo_bitaps(client, endereco)
-            elif api_name == "Blocknomics":
-                resultado = await verificar_saldo_blocknomics(client, endereco)
             else:
                 return False, 0, None
             
